@@ -24,6 +24,7 @@ describe('ConfigEditor', () => {
       'AccessKey ID',
       'AccessKey secret',
       'SQL time zone',
+      'Level field',
       'International site',
     ]) {
       // Required fields append " *" in a separate element.

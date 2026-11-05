@@ -18,6 +18,20 @@ export interface SLSQuery extends DataQuery {
   timeColumn?: string;
   /** Run SQL on the Dedicated SQL engine. */
   powerSql?: boolean;
+  /** Special queries built by the plugin itself; never set by the query editor. */
+  queryType?: typeof QUERY_TYPE_LOGS_VOLUME | typeof QUERY_TYPE_LOGS_CONTEXT;
+  context?: LogsContextParams;
+}
+
+export const QUERY_TYPE_LOGS_VOLUME = 'logsVolume';
+export const QUERY_TYPE_LOGS_CONTEXT = 'logsContext';
+
+/** Identifies a log by its pack (SLS returns __tag__:__pack_id__ and __pack_meta__ with every row). */
+export interface LogsContextParams {
+  packId: string;
+  packMeta: string;
+  direction: 'backward' | 'forward';
+  limit: number;
 }
 
 export const DEFAULT_MAX_LINES = 1000;
@@ -32,6 +46,8 @@ export interface SLSDataSourceOptions extends DataSourceJsonData {
   international?: boolean;
   /** Time zone of date-time strings returned by SLS SQL. Default Asia/Shanghai (UTC+8). */
   sqlTimeZone?: string;
+  /** Field holding the log level. Default `level`. */
+  levelField?: string;
 }
 
 export interface SLSSecureJsonData {

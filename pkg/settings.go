@@ -19,7 +19,10 @@ type settings struct {
 	International bool   `json:"international"` // console on alibabacloud.com instead of aliyun.com
 	// SQLTimeZone is the zone of date-time strings returned by SLS SQL (timestamp columns,
 	// from_unixtime, date_format), which carry no offset. SLS uses UTC+8 by default.
-	SQLTimeZone     string `json:"sqlTimeZone"`
+	SQLTimeZone string `json:"sqlTimeZone"`
+	// LevelField is the log field holding the severity (default "level"). It drives level colouring
+	// and the logs volume histogram; with SQL statistics enabled on it the volume is split by level.
+	LevelField      string `json:"levelField"`
 	sqlLocation     *time.Location
 	AccessKeyID     string
 	AccessKeySecret string
@@ -36,6 +39,9 @@ func loadSettings(s backend.DataSourceInstanceSettings) (*settings, error) {
 	cfg.AccessKeyID = s.DecryptedSecureJSONData["accessKeyId"]
 	cfg.AccessKeySecret = s.DecryptedSecureJSONData["accessKeySecret"]
 
+	if cfg.LevelField == "" {
+		cfg.LevelField = "level"
+	}
 	if cfg.SQLTimeZone == "" {
 		cfg.SQLTimeZone = "Asia/Shanghai"
 	}

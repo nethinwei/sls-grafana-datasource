@@ -58,6 +58,16 @@ export function QueryEditor({ datasource, query, onChange, onRunQuery, range }: 
     datasource.getLogstores().then(setLogstores, () => setLogstores([]));
   }, [datasource]);
 
+  // Field names of the chosen logstore for completion (from its index, or a sample of logs).
+  const [fields, setFields] = useState<string[]>([]);
+  const fieldsLogstore = query.logstore?.startsWith('$') ? undefined : query.logstore;
+  useEffect(() => {
+    datasource.getFields(fieldsLogstore).then(
+      (fs) => setFields(fs.map((f) => f.name)),
+      () => setFields([])
+    );
+  }, [datasource, fieldsLogstore]);
+
   const update = (patch: Partial<SLSQuery>, run = false) => {
     onChange({ ...clean(query), ...patch });
     if (run) {
@@ -116,7 +126,12 @@ export function QueryEditor({ datasource, query, onChange, onRunQuery, range }: 
         </Button>
       </InlineFieldRow>
 
-      <SLSQueryField value={query.query ?? ''} onChange={(v) => update({ query: v })} onRunQuery={onRunQuery} />
+      <SLSQueryField
+        value={query.query ?? ''}
+        fields={fields}
+        onChange={(v) => update({ query: v })}
+        onRunQuery={onRunQuery}
+      />
 
       <InlineFieldRow>
         <InlineField

@@ -31,9 +31,46 @@ type queryModel struct {
 	TimeColumn string `json:"timeColumn"`
 	PowerSQL   bool   `json:"powerSql"`
 
+	// QueryType selects a special query sent by the frontend; empty for normal queries. Plugin 2.x
+	// stored PromQL types ("range", "instant") here, which are treated as normal queries.
+	QueryType string         `json:"queryType"`
+	Context   *contextParams `json:"context"`
+
 	LegacyXcol        string `json:"xcol"`
 	LegacyLogsPerPage int64  `json:"logsPerPage"`
 	LegacyTotalLogs   int64  `json:"totalLogs"`
+}
+
+const (
+	queryTypeLogsVolume  = "logsVolume"  // log counts over time by level, for the logs volume histogram
+	queryTypeLogsContext = "logsContext" // lines around one log, for log context
+)
+
+// contextParams identifies a log by its pack (returned thanks to `| with_pack_meta`) and the lines
+// wanted before ("backward") or after ("forward") it.
+type contextParams struct {
+	PackID    string `json:"packId"`
+	PackMeta  string `json:"packMeta"`
+	Direction string `json:"direction"`
+	Limit     int    `json:"limit"`
+}
+
+var (
+	sqlPipe      = regexp.MustCompile(`(?i)\|\s*select\b`)
+	packMetaPipe = regexp.MustCompile(`(?i)\|\s*with_pack_meta\s*$`)
+)
+
+// isSQL reports whether the statement has an SQL part. Search and SPL (`| where`, `| extend`, ...)
+// return log rows; SQL always starts with `| select`.
+func isSQL(query string) bool { return sqlPipe.MatchString(query) }
+
+// withPackMeta asks SLS to return __pack_meta__ with every log row, which GetContextLogs needs to
+// locate a log. It costs nothing measurable and only applies to search and SPL.
+func withPackMeta(query string) string {
+	if isSQL(query) || packMetaPipe.MatchString(query) {
+		return query
+	}
+	return query + " | with_pack_meta"
 }
 
 var legacyChartModes = map[string]bool{"": true, "table": true, "bar": true, "pie": true, "map": true, "stat": true, "trace": true}

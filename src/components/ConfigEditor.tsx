@@ -104,6 +104,17 @@ export function ConfigEditor({ options, onOptionsChange }: Props) {
           onChange={(e) => setJson({ sqlTimeZone: e.currentTarget.value.trim() || undefined })}
         />
       </Field>
+      <Field
+        label="Level field"
+        description="Field holding the log level, used for level colours and the logs volume. Enable SQL statistics on it to split the volume by level."
+      >
+        <Input
+          width={30}
+          placeholder="level"
+          value={jsonData.levelField ?? ''}
+          onChange={(e) => setJson({ levelField: e.currentTarget.value.trim() || undefined })}
+        />
+      </Field>
       <Field label="International site" description="Open the console on alibabacloud.com instead of aliyun.com.">
         <Switch
           value={Boolean(jsonData.international)}

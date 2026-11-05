@@ -1,4 +1,4 @@
-import { CoreApp, type DataSourceInstanceSettings } from '@grafana/data';
+import { CoreApp, type DataSourceInstanceSettings, SupplementaryQueryType } from '@grafana/data';
 import type { TemplateSrv } from '@grafana/runtime';
 
 import { DEFAULT_SQL, SLSDataSource, toVariableQuery } from './datasource';
@@ -53,5 +53,48 @@ describe('toVariableQuery', () => {
     [undefined, { refId: 'variable' }],
   ])('%j', (stored, want) => {
     expect(toVariableQuery(stored as never)).toEqual(want);
+  });
+});
+
+describe('log features', () => {
+  const ds = new SLSDataSource(
+    { ...settings, jsonData: { ...settings.jsonData, levelField: 'severity' } } as typeof settings,
+    passthrough
+  );
+
+  it('filters on fields from Explore, mapping detected_level to the level field', () => {
+    const q = { refId: 'A', query: 'service: api' };
+    expect(
+      ds.toggleQueryFilter(q, { type: 'FILTER_FOR', options: { key: 'detected_level', value: 'ERROR' } }).query
+    ).toBe('service: api and severity: "ERROR"');
+    expect(ds.toggleQueryFilter(q, { type: 'FILTER_OUT', options: { key: 'channel', value: 'x' } }).query).toBe(
+      'service: api and not channel: "x"'
+    );
+    // Fields added by the plugin are not SLS fields.
+    expect(ds.toggleQueryFilter(q, { type: 'FILTER_FOR', options: { key: 'message', value: 'x' } })).toBe(q);
+    expect(
+      ds.queryHasFilter({ refId: 'A', query: 'severity: "ERROR"' }, { key: 'detected_level', value: 'ERROR' })
+    ).toBe(true);
+    expect(ds.modifyQuery(q, { type: 'ADD_STRING_FILTER_OUT', options: { value: 'timeout' } }).query).toBe(
+      'service: api and not "timeout"'
+    );
+  });
+
+  it('asks for a logs volume only for plain searches', () => {
+    const volume = { type: SupplementaryQueryType.LogsVolume } as const;
+    expect(ds.getSupplementaryQuery(volume, { refId: 'A', query: 'level: ERROR' })).toEqual({
+      refId: 'log-volume-A',
+      query: 'level: ERROR',
+      queryType: 'logsVolume',
+    });
+    expect(ds.getSupplementaryQuery(volume, { refId: 'A', query: '* | select count(*)' })).toBeUndefined();
+    expect(ds.getSupplementaryQuery(volume, { refId: 'A', query: '* | where a > 1' })).toBeUndefined();
+  });
+
+  it('applies dashboard ad hoc filters to the search part', () => {
+    const q = ds.applyTemplateVariables({ refId: 'A', query: '* | select count(*) as c' }, {}, [
+      { key: 'service', operator: '=', value: 'api' },
+    ]);
+    expect(q.query).toBe('service: "api" | select count(*) as c');
   });
 });

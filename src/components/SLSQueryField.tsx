@@ -1,7 +1,7 @@
 import { CodeEditor, type Monaco, type monacoTypes } from '@grafana/ui';
-import React, { useCallback, useEffect, useRef } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 
-import { getCompletionProvider } from '../language/completion';
+import { getCompletionProvider, setModelFields } from '../language/completion';
 import { slsLanguageDefinition } from '../language/definition';
 import { language, languageConfiguration } from '../language/sls';
 
@@ -25,21 +25,33 @@ interface Props {
   onChange: (value: string) => void;
   onRunQuery?: () => void;
   height?: number;
+  /** Field names suggested while typing. */
+  fields?: string[];
 }
 
 /** SLS search / SPL / SQL editor with syntax highlighting and completion. */
-export function SLSQueryField({ value, onChange, onRunQuery, height = 80 }: Props) {
+export function SLSQueryField({ value, onChange, onRunQuery, height = 80, fields }: Props) {
   // The Shift+Enter command is registered once on mount; read the latest callbacks through refs.
   const latest = useRef({ onChange, onRunQuery });
   useEffect(() => {
     latest.current = { onChange, onRunQuery };
   }, [onChange, onRunQuery]);
 
+  const [modelUri, setModelUri] = useState<string>();
+  useEffect(() => {
+    if (!modelUri) {
+      return;
+    }
+    setModelFields(modelUri, fields);
+    return () => setModelFields(modelUri, undefined);
+  }, [modelUri, fields]);
+
   const onEditorDidMount = useCallback((editor: monacoTypes.editor.IStandaloneCodeEditor, monaco: Monaco) => {
     editor.addCommand(monaco.KeyMod.Shift | monaco.KeyCode.Enter, () => {
       latest.current.onChange(editor.getValue());
       latest.current.onRunQuery?.();
     });
+    setModelUri(editor.getModel()?.uri.toString());
   }, []);
 
   return (

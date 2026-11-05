@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -32,7 +33,7 @@ func TestBuildLogsFrame(t *testing.T) {
 			"__tag__:__hostname__": "host-a", "level": "ERROR", "msg": `pay "failed"`, "code": "12001"},
 		{"__time__": "1700000001", "level": "WARN", "msg": "slow", "channel": "coda", "error": ""},
 	}
-	f := buildLogsFrame(logs)
+	f := buildLogsFrame(logs, "level")
 
 	if f.Meta.PreferredVisualization != data.VisTypeLogs {
 		t.Errorf("preferred visualisation = %q", f.Meta.PreferredVisualization)
@@ -53,7 +54,7 @@ func TestBuildLogsFrame(t *testing.T) {
 		t.Errorf("mismatched field lengths: %v", err)
 	}
 	// Stable column order across calls.
-	again := buildLogsFrame(logs)
+	again := buildLogsFrame(logs, "level")
 	if a, b := fieldNames(f), fieldNames(again); len(a) != len(b) {
 		t.Fatal("column count changed")
 	} else {
@@ -159,5 +160,64 @@ func TestParseTimeValue(t *testing.T) {
 	}
 	if _, err := parseTimeValue("yesterday", shanghai); err == nil {
 		t.Error("expected error")
+	}
+}
+
+func TestLogsFrameIDAndLevel(t *testing.T) {
+	logs := []map[string]string{
+		{"__time__": "1700000000", "__tag__:__pack_id__": "P-1", "__pack_meta__": "0|abc|9|8", "severity": "ERROR", "msg": "a", "id": "biz-1"},
+		{"__time__": "1700000000", "severity": "WARN", "msg": "same"},
+		{"__time__": "1700000000", "severity": "WARN", "msg": "same"},
+	}
+	f := buildLogsFrame(logs, "severity")
+	ids := field(t, f, "id")
+	if ids.At(0) != "P-1/0|abc|9|8" {
+		t.Errorf("id from pack = %v", ids.At(0))
+	}
+	if ids.At(1) == ids.At(2) {
+		t.Error("identical logs must keep distinct ids")
+	}
+	if got := field(t, f, "detected_level").At(0); got != "ERROR" {
+		t.Errorf("detected_level = %v", got)
+	}
+	// The log's own "id" field stays in the line and does not clash with the row id.
+	if got := field(t, f, "message").At(0).(string); got != `id="biz-1" msg="a" severity="ERROR"` {
+		t.Errorf("message = %q", got)
+	}
+	// With the default level field no copy is added.
+	if g := buildLogsFrame(logs[:1], "level"); len(fieldNames(g)) == len(fieldNames(f)) {
+		for _, n := range fieldNames(g) {
+			if n == "detected_level" {
+				t.Error("detected_level must only be added for a non-default level field")
+			}
+		}
+	}
+}
+
+func TestBuildVolumeFrames(t *testing.T) {
+	rows := []map[string]string{
+		{"time": "1700000060", "level": "ERROR", "count": "2"},
+		{"time": "1700000000", "level": "ERROR", "count": "1"},
+		{"time": "1700000000", "level": "info", "count": "9"},
+		{"time": "1700000000", "level": "null", "count": "3"},
+	}
+	frames, err := buildVolumeFrames(rows, time.UTC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string][]float64{}
+	for _, f := range frames {
+		vf := f.Fields[1]
+		var vals []float64
+		for i := 0; i < vf.Len(); i++ {
+			vals = append(vals, vf.At(i).(float64))
+		}
+		got[vf.Labels["level"]] = vals
+	}
+	want := map[string][]float64{"error": {1, 2}, "info": {9}, "unknown": {3}}
+	for l, w := range want {
+		if fmt.Sprint(got[l]) != fmt.Sprint(w) {
+			t.Errorf("level %s = %v, want %v (sorted by time)", l, got[l], w)
+		}
 	}
 }

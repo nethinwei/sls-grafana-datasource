@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"hash/fnv"
 	"math"
 	"sort"
 	"strconv"
@@ -13,9 +14,11 @@ import (
 
 // ---------- logs ----------
 
-// buildLogsFrame turns search (non-SQL) results into a frame for the Logs panel: a nanosecond
-// timestamp, a readable line and every field as its own column.
-func buildLogsFrame(logs []map[string]string) *data.Frame {
+// buildLogsFrame turns search and SPL results into a frame for the Logs panel: a nanosecond
+// timestamp, a readable line, an id, and every field as its own column (so field overrides such as
+// data links keep working). Grafana takes the severity from a field named "level"; when the
+// configured level field has another name it is copied to "detected_level".
+func buildLogsFrame(logs []map[string]string, levelField string) *data.Frame {
 	var keys []string
 	seen := map[string]bool{}
 	for _, l := range logs {
@@ -31,6 +34,7 @@ func buildLogsFrame(logs []map[string]string) *data.Frame {
 
 	times := make([]time.Time, len(logs))
 	lines := make([]string, len(logs))
+	ids := make([]string, len(logs))
 	columns := make(map[string][]string, len(keys))
 	for _, k := range keys {
 		columns[k] = make([]string, len(logs))
@@ -38,6 +42,7 @@ func buildLogsFrame(logs []map[string]string) *data.Frame {
 	for i, l := range logs {
 		times[i] = logTime(l)
 		lines[i] = logLine(l, keys)
+		ids[i] = logID(l, times[i], lines[i], i)
 		for k, v := range l {
 			columns[k][i] = v
 		}
@@ -46,9 +51,16 @@ func buildLogsFrame(logs []map[string]string) *data.Frame {
 	frame := data.NewFrame("logs",
 		data.NewField("time", nil, times),
 		data.NewField("message", nil, lines),
+		data.NewField("id", nil, ids),
 	)
 	for _, k := range keys {
+		if k == "id" {
+			continue // the log's own "id" field would collide with the row id; it is part of the line
+		}
 		frame.Fields = append(frame.Fields, data.NewField(k, nil, columns[k]))
+	}
+	if levelField != "level" && seen[levelField] {
+		frame.Fields = append(frame.Fields, data.NewField("detected_level", nil, columns[levelField]))
 	}
 	frame.Meta = &data.FrameMeta{PreferredVisualization: data.VisTypeLogs}
 	return frame
@@ -60,6 +72,19 @@ func logTime(l map[string]string) time.Time {
 	sec, _ := strconv.ParseInt(l["__time__"], 10, 64)
 	ns, _ := strconv.ParseInt(l["__time_ns_part__"], 10, 64)
 	return time.Unix(sec, ns)
+}
+
+// logID identifies a log row for Grafana (deduplication, permalinks): the pack ID plus the position
+// inside the pack, which SLS returns with `| with_pack_meta`. Without it, a hash of time and line
+// suffixed with the row index, so identical logs are not merged.
+func logID(l map[string]string, t time.Time, line string, row int) string {
+	if pack, meta := l["__tag__:__pack_id__"], l["__pack_meta__"]; pack != "" && meta != "" {
+		return pack + "/" + meta
+	}
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(strconv.FormatInt(t.UnixNano(), 10)))
+	_, _ = h.Write([]byte(line))
+	return strconv.FormatUint(h.Sum64(), 36) + "_" + strconv.Itoa(row)
 }
 
 // logLine renders `key="value"` pairs for the keys present in this log, leaving out SLS reserved and
@@ -308,4 +333,51 @@ func parseTimeValue(v string, loc *time.Location) (time.Time, error) {
 		}
 	}
 	return time.Time{}, fmt.Errorf("cannot parse %q as time", v)
+}
+
+// ---------- logs volume ----------
+
+// buildVolumeFrames turns `time, level, count` SQL rows into one series per level, the shape the
+// logs volume histogram expects: a time field and a number field labelled with the level.
+func buildVolumeFrames(rows []map[string]string, loc *time.Location) (data.Frames, error) {
+	type series struct {
+		times  []time.Time
+		counts []float64
+	}
+	byLevel := map[string]*series{}
+	for _, r := range rows {
+		t, err := parseTimeValue(r["time"], loc)
+		if err != nil {
+			return nil, err
+		}
+		c, _ := strconv.ParseFloat(r["count"], 64)
+		level := strings.ToLower(r["level"])
+		if isNull(level) {
+			level = "unknown"
+		}
+		s := byLevel[level]
+		if s == nil {
+			s = &series{}
+			byLevel[level] = s
+		}
+		s.times = append(s.times, t)
+		s.counts = append(s.counts, c)
+	}
+	levels := make([]string, 0, len(byLevel))
+	for l := range byLevel {
+		levels = append(levels, l)
+	}
+	sort.Strings(levels)
+	frames := make(data.Frames, 0, len(levels))
+	for _, l := range levels {
+		s := byLevel[l]
+		f := data.NewFrame("",
+			data.NewField("time", nil, s.times),
+			data.NewField("count", data.Labels{"level": l}, s.counts),
+		)
+		sortByTime(f)
+		f.Meta = &data.FrameMeta{Type: data.FrameTypeTimeSeriesMulti}
+		frames = append(frames, f)
+	}
+	return frames, nil
 }
