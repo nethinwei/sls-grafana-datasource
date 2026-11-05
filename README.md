@@ -132,14 +132,14 @@ processors:
 | 规则 | 示例 | 说明 |
 |---|---|---|
 | `time` | `__time__` + `__time_ns_part__` → `timestamp` | 由秒和可选的纳秒字段合成时间。目标是时间字段时成为日志时间；采集端没有纳秒字段时纳秒按 0 处理 |
-| `rename` | `__tag__:__hostname__` → `host.name` | 改名。筛选与补全会自动换回 SLS 原名 |
-| `extract` | `log.file.path` 按 `/logs/(.+)\.log` 取 `$1` → `service.name` | 正则提取，支持命名分组 `${name}` |
+| `rename` | `__tag__:__hostname__` → `host_name` | 改名。筛选与补全会自动换回 SLS 原名 |
+| `extract` | `log_file_path` 按 `/logs/(.+)\.log` 取 `$1` → `service_name` | 正则提取，支持命名分组 `${name}` |
 | `drop` | `__topic__` | 隐藏字段 |
 | `default` | `deployment.environment` = `prod` | 字段缺失或为空时的取值 |
 | `template` | `${service}/${env}` → `app` | 由其他字段拼出新字段，`$$` 表示 `$` |
 | `json` | `request` → `request_method`、`request_header_Content_Type` | 把嵌套的 JSON 对象展开成字段，规则同 Loki 的 `\| json`：键名用 `_` 连接，字母、数字、`_` 以外的字符换成 `_`，数组和 null 跳过，与已有字段重名时加 `_extracted`。不填 from 时展开所有值为 JSON 对象的字段 |
 
-没有配置规则时使用默认规则：用 `__time__` 和 `__time_ns_part__` 合成 `timestamp`，隐藏这两个字段，再用 `json` 展开所有嵌套对象。配置页的「Add OpenTelemetry renames」会追加 `host.name`、`host.ip`、`log.file.path` 三条改名规则。除 `rename` 外，规则产生的字段只存在于 Grafana，不能用于筛选。`__tag__:__pack_id__` 与 `__pack_meta__` 是日志上下文需要的字段，不能改名或隐藏；无效的规则会被跳过，并在「Save & test」中列出。
+没有配置规则时使用默认规则：用 `__time__` 和 `__time_ns_part__` 合成 `timestamp`，隐藏这两个字段，再用 `json` 展开所有嵌套对象。配置页的「Add OpenTelemetry renames」会追加 `host_name`、`host_ip`、`log_file_path` 三条改名规则（OpenTelemetry 语义名，点号换成下划线，与 Loki 存储 OpenTelemetry 属性的方式一致；Grafana 的日志高亮只把字母、数字、下划线认作字段名）。除 `rename` 外，规则产生的字段只存在于 Grafana，不能用于筛选。`__tag__:__pack_id__` 与 `__pack_meta__` 是日志上下文需要的字段，不能改名或隐藏；无效的规则会被跳过，并在「Save & test」中列出。
 
 用配置文件创建数据源时：
 
@@ -150,15 +150,15 @@ jsonData:
   logs:
     levelField: level
     line:
-      fields: [service_name, host.name, host.ip, msg]
+      fields: [service_name, host_name, host_ip, msg]
       exclude: [source]
     rules:
       - { type: time, from: __time__, nanos: __time_ns_part__, to: timestamp }
       - { type: drop, field: __time__ }
       - { type: drop, field: __time_ns_part__ }
       - { type: json }
-      - { type: rename, from: __tag__:__hostname__, to: host.name }
-      - { type: rename, from: __tag__:__host_ip__, to: host.ip }
+      - { type: rename, from: __tag__:__hostname__, to: host_name }
+      - { type: rename, from: __tag__:__host_ip__, to: host_ip }
 ```
 
 ## 从 2.x 迁移
