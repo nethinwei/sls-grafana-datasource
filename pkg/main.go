@@ -8,7 +8,7 @@ import (
 	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
 )
 
-const pluginID = "aliyun-log-service-datasource"
+const pluginID = "nethinwei-sls-datasource"
 
 func main() {
 	if err := sdkds.Manage(pluginID, newDatasource, sdkds.ManageOpts{}); err != nil {

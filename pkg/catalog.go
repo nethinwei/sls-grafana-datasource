@@ -79,7 +79,12 @@ func (c *catalogBuilder) remove(name string) {
 	delete(c.fields, name)
 }
 
+// derive records a field produced by a rule. A rule writing into a field the logs already have
+// (a default for an indexed field) leaves it an SLS field, still searchable and filterable.
 func (c *catalogBuilder) derive(name, ruleType string) {
+	if f, ok := c.fields[name]; ok && f.SLSName != "" {
+		return
+	}
 	c.fields[name] = &catalogField{Name: name, Rule: ruleType}
 }
 
@@ -135,10 +140,9 @@ func buildCatalog(index *sls.Index, sample []map[string]string, view *logsView) 
 		r.describe(c)
 	}
 	if c.discovered != "" && len(sample) > 0 {
-		t, run := view.table(sample)
-		for name := range t.cols {
-			// Fields of the logs and those described by rules are known; the rest come from the rule.
-			if _, known := c.fields[name]; !known && !strings.HasPrefix(name, "__") && name != view.timeField {
+		_, run := view.table(sample)
+		for name := range run.flattened {
+			if _, known := c.fields[name]; !known {
 				c.fields[name] = &catalogField{Name: name, Rule: c.discovered, Expr: view.fieldExpr(name, run)}
 			}
 		}
@@ -148,7 +152,10 @@ func buildCatalog(index *sls.Index, sample []map[string]string, view *logsView) 
 
 // ---------- cache ----------
 
-const catalogTTL = 5 * time.Minute
+const (
+	catalogTTL        = 5 * time.Minute
+	catalogPartialTTL = 30 * time.Second
+)
 
 type catalogCache struct {
 	mu      sync.Mutex
@@ -176,8 +183,20 @@ func (ds *datasource) catalog(ctx context.Context, logstore string) (*catalog, e
 		return e.c, nil
 	}
 
-	index, indexErr := call(ctx, func() (*sls.Index, error) { return ds.client.GetIndex(ds.cfg.Project, logstore) })
-	sample, sampleErr := ds.sample(ctx, logstore, "*", 0, 0)
+	var index *sls.Index
+	var sample []map[string]string
+	var indexErr, sampleErr error
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		index, indexErr = call(ctx, func() (*sls.Index, error) { return ds.client.GetIndex(ds.cfg.Project, logstore) })
+	}()
+	go func() {
+		defer wg.Done()
+		sample, sampleErr = ds.sample(ctx, logstore, "*", 0, 0)
+	}()
+	wg.Wait()
 	if indexErr != nil && sampleErr != nil {
 		return nil, indexErr
 	}
@@ -186,11 +205,17 @@ func (ds *datasource) catalog(ctx context.Context, logstore string) (*catalog, e
 	}
 	c := buildCatalog(index, sample, &ds.cfg.view)
 
+	// A catalog built without the sample (a transient failure) is retried soon; a missing index
+	// permission does not change, so that one is kept for the full TTL.
+	at := time.Now()
+	if sampleErr != nil {
+		at = at.Add(catalogPartialTTL - catalogTTL)
+	}
 	ds.catalogs.mu.Lock()
 	if ds.catalogs.entries == nil {
 		ds.catalogs.entries = map[string]catalogEntry{}
 	}
-	ds.catalogs.entries[logstore] = catalogEntry{time.Now(), c}
+	ds.catalogs.entries[logstore] = catalogEntry{at, c}
 	ds.catalogs.mu.Unlock()
 	return c, nil
 }

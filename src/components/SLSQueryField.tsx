@@ -76,9 +76,16 @@ export function SLSQueryField({ value, onChange, onRunQuery, height = 80, catalo
   }, [editor, catalog]);
 
   const onEditorDidMount = useCallback((ed: monacoTypes.editor.IStandaloneCodeEditor, monaco: Monaco) => {
-    ed.addCommand(monaco.KeyMod.Shift | monaco.KeyCode.Enter, () => {
-      latest.current.onChange(ed.getValue());
-      latest.current.onRunQuery?.();
+    // An action belongs to this editor; addCommand would bind Shift+Enter for every editor on the
+    // page to the last one mounted.
+    ed.addAction({
+      id: 'sls.runQuery',
+      label: 'Run query',
+      keybindings: [monaco.KeyMod.Shift | monaco.KeyCode.Enter],
+      run: () => {
+        latest.current.onChange(ed.getValue());
+        latest.current.onRunQuery?.();
+      },
     });
     setEditor({ ed, monaco });
   }, []);

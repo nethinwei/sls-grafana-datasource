@@ -27,7 +27,10 @@ function origin(f: CatalogField): string {
   if (!f.rule) {
     return '';
   }
-  return f.slsName ? `${f.rule} of ${f.slsName}` : `${f.rule} rule (Grafana only)`;
+  if (f.slsName) {
+    return `${f.rule} of ${f.slsName}`;
+  }
+  return f.expr ? `${f.rule} rule` : `${f.rule} rule (Grafana only)`;
 }
 
 /**
@@ -85,6 +88,10 @@ export function FieldBrowser({ catalog, loading, onRefresh, onDismiss }: Props) 
                 <td>
                   {f.slsName ? (
                     <Flag value={f.indexed} yes="Field index: field: value works" no="No index: use | where" />
+                  ) : f.expr ? (
+                    <Tooltip content={`Filtered with SPL: | where ${f.expr} = …`}>
+                      <Text color="secondary">SPL</Text>
+                    </Tooltip>
                   ) : (
                     '-'
                   )}

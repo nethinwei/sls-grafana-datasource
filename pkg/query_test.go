@@ -8,35 +8,41 @@ import (
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 )
 
-func TestParseQueryLegacyFields(t *testing.T) {
+func TestParseQuery(t *testing.T) {
 	cases := []struct {
 		json       string
 		maxLines   int64
 		timeColumn string
+		format     string
 	}{
-		{`{"query":"*"}`, defaultMaxLines, "time"},
-		{`{"query":"*","logsPerPage":100,"totalLogs":500}`, 500, "time"},
-		{`{"query":"*","maxLines":99999}`, maxMaxLines, "time"},
-		{`{"query":"*","xcol":"t","ycol":"svc#:#c"}`, defaultMaxLines, "t"},
-		{`{"query":"*","xcol":"pie"}`, defaultMaxLines, "time"},
-		{`{"query":"*","xcol":"t","timeColumn":"ts"}`, defaultMaxLines, "ts"},
+		{`{"query":"*"}`, defaultMaxLines, "time", formatTimeSeries},
+		{`{"query":"*","maxLines":99999}`, maxMaxLines, "time", formatTimeSeries},
+		{`{"query":"*","timeColumn":"ts","format":"table"}`, defaultMaxLines, "ts", formatTable},
+		// Fields of plugin 2.x are not read any more.
+		{`{"query":"*","xcol":"t","logsPerPage":100,"totalLogs":500}`, defaultMaxLines, "time", formatTimeSeries},
 	}
 	for _, c := range cases {
 		m, err := parseQuery(backend.DataQuery{JSON: json.RawMessage(c.json)})
 		if err != nil {
 			t.Fatalf("%s: %v", c.json, err)
 		}
-		if m.MaxLines != c.maxLines || m.TimeColumn != c.timeColumn {
-			t.Errorf("%s: maxLines=%d timeColumn=%q, want %d %q", c.json, m.MaxLines, m.TimeColumn, c.maxLines, c.timeColumn)
+		if m.MaxLines != c.maxLines || m.TimeColumn != c.timeColumn || m.Format != c.format {
+			t.Errorf("%s: maxLines=%d timeColumn=%q format=%q", c.json, m.MaxLines, m.TimeColumn, m.Format)
 		}
+	}
+	if _, err := parseQuery(backend.DataQuery{JSON: json.RawMessage(`{"format":"pie"}`)}); err == nil {
+		t.Error("unknown formats are rejected")
 	}
 }
 
 func TestApplyMacros(t *testing.T) {
 	tr := backend.TimeRange{From: time.Unix(1700000000, 0), To: time.Unix(1700003600, 0)}
 	cases := map[string]string{
-		"* | select $__timeGroup(__time__) as time, count(*) group by time":            "* | select (__time__ - __time__ % 60) as time, count(*) group by time",
-		"* | select $__timeGroup( __time__ , 5m ) as time":                             "* | select (__time__ - __time__ % 300) as time",
+		"* | select $__timeGroup(__time__) as time, count(*) group by time":            "* | select ((__time__) - (__time__) % 60) as time, count(*) group by time",
+		"* | select $__timeGroup( __time__ , 5m ) as time":                             "* | select ((__time__) - (__time__) % 300) as time",
+		"* | select $__timeGroup(__time__ + 28800, 24h) as day":                        "* | select ((__time__ + 28800) - (__time__ + 28800) % 86400) as day",
+		"* | select $__timeGroup(to_unixtime(time), 1m) as t":                          "* | select ((to_unixtime(time)) - (to_unixtime(time)) % 60) as t",
+		"* | select $__timeGroup(coalesce(a, ')'), 1m) as t":                           "* | select ((coalesce(a, ')')) - (coalesce(a, ')')) % 60) as t",
 		"* | select __time__ - __time__ % $__interval_s as t":                          "* | select __time__ - __time__ % 60 as t",
 		"* | select count(*) where __time__ >= $__timeFrom and __time__ < $__timeTo()": "* | select count(*) where __time__ >= 1700000000 and __time__ < 1700003600",
 	}

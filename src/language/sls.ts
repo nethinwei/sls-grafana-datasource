@@ -1,6 +1,5 @@
 import type { monacoTypes } from '@grafana/ui';
 import { functions, keywords, operators } from './slsterms';
-import _ from 'lodash';
 
 export const languageConfiguration: monacoTypes.languages.LanguageConfiguration = {
   wordPattern: /(-?\d*\.\d\w*)|([^`~!#%^&*()\-=+\[{\]}\\|;:'",.<>\/?\s]+)/g,
@@ -30,15 +29,7 @@ export const languageConfiguration: monacoTypes.languages.LanguageConfiguration 
   folding: {},
 };
 
-// const sls_functions = functions
-
 const slsFunctionsList = Object.keys(functions);
-const slsFuncitonsSuggest = slsFunctionsList.map((value) => {
-  return {
-    label: value,
-    type: _.get(functions, value).type,
-  };
-});
 
 const slsKeywordsList = keywords.map((value) => {
   return value.label;
@@ -46,7 +37,6 @@ const slsKeywordsList = keywords.map((value) => {
 const slsoperatorList = operators.map((value) => {
   return value.label;
 });
-const allSuggestions = slsFuncitonsSuggest.concat(keywords).concat(operators);
 
 export const language = {
   ignoreCase: true,
@@ -155,18 +145,3 @@ export const language = {
     ],
   },
 } as monacoTypes.languages.IMonarchLanguage;
-
-export const completionItemProvider: monacoTypes.languages.CompletionItemProvider = {
-  provideCompletionItems: () => {
-    const suggestions = allSuggestions.map((value) => {
-      return {
-        label: value,
-        kind: value.type,
-        insertText: value.label,
-        detail: value.label,
-        insertTextRules: 4 as monacoTypes.languages.CompletionItemInsertTextRule.InsertAsSnippet,
-      } as unknown as monacoTypes.languages.CompletionItem;
-    });
-    return { suggestions } as monacoTypes.languages.ProviderResult<monacoTypes.languages.CompletionList>;
-  },
-};

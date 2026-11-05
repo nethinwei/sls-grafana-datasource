@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -55,6 +57,9 @@ type applyContext struct {
 	times     rowTimes // written by a time rule whose target is timeField
 	// flattened maps the fields a json rule created in this run to where they come from.
 	flattened map[string]jsonPath
+	// maxFlattened bounds len(flattened) (0: no limit); flattenLimited reports that it was reached.
+	maxFlattened   int
+	flattenLimited bool
 }
 
 // jsonPath locates a flattened field: a key path inside the JSON object of a field.
@@ -443,6 +448,7 @@ func (r jsonRule) apply(t *table, ctx *applyContext) {
 				sources = append(sources, name)
 			}
 		}
+		sort.Strings(sources) // deterministic names when two sources flatten to the same one
 	}
 	existing := make(map[string]bool, len(t.cols))
 	for name := range t.cols {
@@ -470,14 +476,23 @@ func (r jsonRule) apply(t *table, ctx *applyContext) {
 	}
 }
 
+// flattenJSON writes the scalar values of obj into flattened columns. Keys are visited in order so
+// that when two keys flatten to the same name (x-env and x_env) the same one wins on every row. At
+// most ctx.maxFlattened distinct fields are created per result: objects keyed by IDs would
+// otherwise add a full column per key.
 func flattenJSON(t *table, ctx *applyContext, existing map[string]bool, src, prefix string, path []string, obj map[string]any, row int) {
-	for k, v := range obj {
+	keys := make([]string, 0, len(obj))
+	for k := range obj {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
 		name := prefix + "_" + sanitizeName(k)
-		keys := append(path[:len(path):len(path)], k)
+		keyPath := append(path[:len(path):len(path)], k)
 		var s string
-		switch x := v.(type) {
+		switch x := obj[k].(type) {
 		case map[string]any:
-			flattenJSON(t, ctx, existing, src, name, keys, x, row)
+			flattenJSON(t, ctx, existing, src, name, keyPath, x, row)
 			continue
 		case string:
 			s = x
@@ -491,13 +506,21 @@ func flattenJSON(t *table, ctx *applyContext, existing map[string]bool, src, pre
 		if existing[name] {
 			name += "_extracted"
 		}
-		c := t.column(name)
-		c.values[row], c.present[row] = s, true
-		if ctx.flattened == nil {
-			ctx.flattened = map[string]jsonPath{}
+		if p, seen := ctx.flattened[name]; !seen {
+			if ctx.maxFlattened > 0 && len(ctx.flattened) >= ctx.maxFlattened {
+				ctx.flattenLimited = true
+				continue
+			}
+			if ctx.flattened == nil {
+				ctx.flattened = map[string]jsonPath{}
+			}
+			ctx.flattened[name] = jsonPath{src, keyPath}
+		} else if p.field != src || !slices.Equal(p.keys, keyPath) {
+			continue // another key already owns this name
 		}
-		if _, seen := ctx.flattened[name]; !seen {
-			ctx.flattened[name] = jsonPath{src, keys}
+		c := t.column(name)
+		if !c.present[row] {
+			c.values[row], c.present[row] = s, true
 		}
 	}
 }
@@ -524,6 +547,10 @@ func (r jsonRule) describe(c *catalogBuilder) {
 	for name, f := range c.fields {
 		base, sub, ok := strings.Cut(name, ".")
 		if !ok || f.SLSName == "" || (r.from != "" && base != r.from) || strings.HasPrefix(base, "__") {
+			continue
+		}
+		// Only keys of a JSON index: a top-level field named like service.name stays as it is.
+		if parent := c.fields[base]; parent == nil || parent.Type != "json" {
 			continue
 		}
 		flat := sanitizeName(base) + "_" + sanitizeName(sub)

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"math"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -119,8 +120,8 @@ func buildLogsFrame(logs []map[string]string, keys [][]string, f *logsView) *dat
 		data.NewField("id", nil, ids),
 	)
 	for _, k := range names {
-		if k == "id" {
-			continue // the log's own "id" field would collide with the row id; it is part of the line
+		if k == "id" || k == "time" || k == "message" || k == "detected_level" {
+			continue // the log's own field would collide with a field of the frame; it is part of the line
 		}
 		frame.Fields = append(frame.Fields, data.NewField(k, nil, t.cols[k].values))
 	}
@@ -142,6 +143,10 @@ func buildLogsFrame(logs []map[string]string, keys [][]string, f *logsView) *dat
 		}
 	}
 	frame.Meta = &data.FrameMeta{PreferredVisualization: data.VisTypeLogs}
+	if run.flattenLimited {
+		frame.Meta.Notices = append(frame.Meta.Notices, data.Notice{Severity: data.NoticeSeverityInfo, Text: fmt.Sprintf(
+			"Only %d nested fields were flattened; the JSON of the others stays in the line. Raise \"Max flattened fields\" in the data source settings to flatten more.", f.maxFlattened)})
+	}
 	if len(grafanaOnly) > 0 || len(exprs) > 0 {
 		frame.Meta.Custom = map[string]any{grafanaOnlyFieldsKey: grafanaOnly, fieldExprsKey: exprs}
 	}
@@ -259,7 +264,7 @@ const (
 // When the result has a time column it becomes a time series: rows are sorted by time and, if there
 // are string columns, converted from long to wide so that every distinct combination of string
 // values becomes its own series (what plugin 2.x expressed with ycol "group#:#value").
-func buildSQLFrame(keys, columnTypes []string, rows []map[string]string, timeColumn string, loc *time.Location) (*data.Frame, error) {
+func buildSQLFrame(keys, columnTypes []string, rows []map[string]string, timeColumn string, loc *time.Location, maxWideCells int) (*data.Frame, error) {
 	if len(keys) == 0 && len(rows) > 0 {
 		for k := range rows[0] {
 			keys = append(keys, k)
@@ -267,9 +272,33 @@ func buildSQLFrame(keys, columnTypes []string, rows []map[string]string, timeCol
 		sort.Strings(keys)
 	}
 
+	// Rows whose time cannot be read have no place in time series: they are left out, with a notice,
+	// instead of failing the whole query.
+	hasTime := timeColumn != "" && slices.Contains(keys, timeColumn)
+	times := make([]time.Time, 0, len(rows))
+	dropped := 0
+	if hasTime {
+		kept := make([]map[string]string, 0, len(rows))
+		for _, row := range rows {
+			t, err := parseTimeValue(row[timeColumn], loc)
+			if err != nil {
+				dropped++
+				continue
+			}
+			kept = append(kept, row)
+			times = append(times, t)
+		}
+		rows = kept
+	}
+
 	frame := data.NewFrame("")
 	timeIdx := -1
 	for i, k := range keys {
+		if hasTime && k == timeColumn {
+			frame.Fields = append(frame.Fields, data.NewField(k, nil, times))
+			timeIdx = len(frame.Fields) - 1
+			continue
+		}
 		values := make([]string, len(rows))
 		for r, row := range rows {
 			values[r] = row[k]
@@ -279,14 +308,8 @@ func buildSQLFrame(keys, columnTypes []string, rows []map[string]string, timeCol
 			typeName = columnTypes[i]
 		}
 		kind := inferKind(typeName, values)
-		if k == timeColumn && (kind == kindNumber || kind == kindTime || kind == kindString) {
-			field, err := timeField(k, values, loc)
-			if err != nil {
-				return nil, err
-			}
-			frame.Fields = append(frame.Fields, field)
-			timeIdx = len(frame.Fields) - 1
-			continue
+		if kind == kindNumber && hasUnsafeInteger(values) {
+			kind = kindString // ids and nanosecond values that float64 cannot hold keep their digits
 		}
 		frame.Fields = append(frame.Fields, typedField(k, kind, values, loc))
 	}
@@ -294,10 +317,42 @@ func buildSQLFrame(keys, columnTypes []string, rows []map[string]string, timeCol
 	if timeIdx < 0 {
 		return frame, nil
 	}
-	return toTimeSeries(frame, timeIdx)
+	out, err := toTimeSeries(frame, timeIdx, maxWideCells)
+	if err == nil && dropped > 0 {
+		out.Meta.Notices = append(out.Meta.Notices, data.Notice{Severity: data.NoticeSeverityWarning,
+			Text: fmt.Sprintf("%d rows were left out: their %q value is empty or not a time", dropped, timeColumn)})
+	}
+	return out, err
 }
 
-func toTimeSeries(frame *data.Frame, timeIdx int) (*data.Frame, error) {
+// maxSafeInteger is the largest integer float64 holds exactly (2^53).
+const maxSafeInteger = 1 << 53
+
+// hasUnsafeInteger reports whether an integer value of the column is beyond ±2^53, where a number
+// field would show a different value.
+func hasUnsafeInteger(values []string) bool {
+	for _, v := range values {
+		if strings.ContainsAny(v, ".eE") {
+			continue
+		}
+		i, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			if _, uerr := strconv.ParseUint(v, 10, 64); uerr == nil {
+				return true
+			}
+			if len(strings.TrimLeft(v, "-+0123456789")) == 0 && len(v) > 16 {
+				return true // beyond int64
+			}
+			continue
+		}
+		if i > maxSafeInteger || i < -maxSafeInteger {
+			return true
+		}
+	}
+	return false
+}
+
+func toTimeSeries(frame *data.Frame, timeIdx int, maxWideCells int) (*data.Frame, error) {
 	// Time first, then sort ascending: both are required by long-to-wide and by the time series panel.
 	fields := make([]*data.Field, 0, len(frame.Fields))
 	fields = append(fields, frame.Fields[timeIdx])
@@ -323,12 +378,57 @@ func toTimeSeries(frame *data.Frame, timeIdx int) (*data.Frame, error) {
 		frame.Meta = &data.FrameMeta{Type: data.FrameTypeTimeSeriesWide}
 		return frame, nil
 	}
+	if cells := wideCells(frame); maxWideCells > 0 && cells > maxWideCells {
+		return nil, userError("the result would become %d time series cells (limit %d): reduce the string columns or their distinct values, "+
+			"aggregate further, or raise \"Max wide-table cells\" in the data source settings", cells, maxWideCells)
+	}
+	if n, _ := frame.RowLen(); n == 0 {
+		frame.Meta = &data.FrameMeta{Type: data.FrameTypeTimeSeriesWide} // no data: no series, not an error
+		return frame, nil
+	}
 	wide, err := data.LongToWide(frame, nil)
 	if err != nil {
 		return nil, userError("cannot turn the result into time series (one row per time and string-column combination is required): %v", err)
 	}
 	wide.Meta = &data.FrameMeta{Type: data.FrameTypeTimeSeriesWide}
 	return wide, nil
+}
+
+// wideCells estimates the cells LongToWide creates: distinct times × distinct combinations of the
+// dimension (string, bool) columns × value columns. It caps at math.MaxInt.
+func wideCells(frame *data.Frame) int {
+	n, _ := frame.RowLen()
+	times := make(map[time.Time]struct{}, n)
+	combos := make(map[string]struct{})
+	values := 0
+	var dims []*data.Field
+	for _, f := range frame.Fields[1:] {
+		switch f.Type() {
+		case data.FieldTypeNullableString, data.FieldTypeNullableBool:
+			dims = append(dims, f)
+		default:
+			values++
+		}
+	}
+	var key strings.Builder
+	for i := 0; i < n; i++ {
+		if t, ok := frame.Fields[0].ConcreteAt(i); ok {
+			times[t.(time.Time)] = struct{}{}
+		}
+		key.Reset()
+		for _, d := range dims {
+			fmt.Fprint(&key, d.At(i), "\x00")
+		}
+		combos[key.String()] = struct{}{}
+	}
+	cells := len(times)
+	for _, m := range []int{len(combos), max(values, 1)} {
+		if cells > 0 && m > math.MaxInt/cells {
+			return math.MaxInt
+		}
+		cells *= m
+	}
+	return cells
 }
 
 func sortByTime(frame *data.Frame) {
@@ -433,19 +533,18 @@ func typedField(name string, kind columnKind, values []string, loc *time.Locatio
 	}
 }
 
-func timeField(name string, values []string, loc *time.Location) (*data.Field, error) {
-	out := make([]time.Time, len(values))
-	for i, v := range values {
-		t, err := parseTimeValue(v, loc)
-		if err != nil {
-			return nil, userError("time column %q: %v", name, err)
-		}
-		out[i] = t
-	}
-	return data.NewField(name, nil, out), nil
+var timeLayouts = []string{
+	time.RFC3339Nano,
+	"2006-01-02T15:04:05.999999999",
+	"2006-01-02 15:04:05.999999999Z07:00",
+	"2006-01-02 15:04:05.999999999 Z07:00",
+	"2006-01-02 15:04:05.999999999",
+	"2006-01-02 15:04",
+	"2006/01/02 15:04:05.999999999",
+	"2006/01/02 15:04",
+	"2006-01-02",
+	"2006/01/02",
 }
-
-var timeLayouts = []string{time.RFC3339Nano, "2006-01-02 15:04:05.999999999", "2006-01-02 15:04:05", "2006-01-02 15:04", "2006-01-02"}
 
 // parseTimeValue accepts unix seconds, milliseconds or nanoseconds (decided by magnitude) and common
 // date-time strings. Strings without an offset are read in loc, the SLS SQL time zone (UTC+8 by
@@ -471,6 +570,8 @@ func parseTimeValue(v string, loc *time.Location) (time.Time, error) {
 			return time.Unix(int64(sec), int64(frac*1e9)), nil
 		case abs < 1e14:
 			return time.UnixMilli(int64(f)), nil
+		case abs < 1e17:
+			return time.UnixMicro(int64(f)), nil
 		default:
 			return time.Unix(0, int64(f)), nil
 		}

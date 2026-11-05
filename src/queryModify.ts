@@ -4,7 +4,10 @@
  * filters are translated by the backend (pkg/filters.go), which knows the field catalog.
  */
 
-/** Splits `search | rest` at the first pipe that is not inside quotes. */
+/**
+ * Splits `search | rest` at the first pipe that is not inside double quotes. A single quote is an
+ * ordinary character in SLS search (msg: it's).
+ */
 export function splitStatement(query: string): { search: string; rest: string } {
   let quote: string | undefined;
   for (let i = 0; i < query.length; i++) {
@@ -15,7 +18,7 @@ export function splitStatement(query: string): { search: string; rest: string } 
       } else if (c === quote) {
         quote = undefined;
       }
-    } else if (c === '"' || c === "'") {
+    } else if (c === '"') {
       quote = c;
     } else if (c === '|') {
       return { search: query.slice(0, i).trim(), rest: query.slice(i) };
@@ -53,7 +56,7 @@ function hasTopLevelOr(search: string): boolean {
       } else if (c === quote) {
         quote = undefined;
       }
-    } else if (c === '"' || c === "'") {
+    } else if (c === '"') {
       quote = c;
     } else if (c === '(') {
       depth++;
@@ -146,7 +149,22 @@ function whereClause(key: string, value: string, negate: boolean, expr?: string)
 
 /** Whether the statement has `| where "key" = 'value'` added by toggleWhereFilter. */
 export function hasWhereFilter(query: string, key: string, value: string, expr?: string): boolean {
-  return query.includes(whereClause(key, value, false, expr));
+  return indexOfClause(query, whereClause(key, value, false, expr)) >= 0;
+}
+
+/** Position of a where clause, not counting a clause for a longer value ('a' inside 'a''b'). */
+function indexOfClause(query: string, clause: string): number {
+  for (let i = query.indexOf(clause); i >= 0; i = query.indexOf(clause, i + 1)) {
+    if (query[i + clause.length] !== "'") {
+      return i;
+    }
+  }
+  return -1;
+}
+
+/** Whether the statement has SQL, where SPL clauses cannot be added. */
+export function isSQL(query: string): boolean {
+  return /^\|\s*(select\b|set\s+session\b)/i.test(splitStatement(query).rest);
 }
 
 /**
@@ -157,12 +175,14 @@ export function hasWhereFilter(query: string, key: string, value: string, expr?:
 export function toggleWhereFilter(query: string, key: string, value: string, negate: boolean, expr?: string): string {
   const wanted = whereClause(key, value, negate, expr);
   const opposite = whereClause(key, value, !negate, expr);
-  const strip = (q: string, clause: string) =>
-    q
-      .replace(' ' + clause, '')
-      .replace(clause, '')
-      .trim();
-  if (query.includes(wanted)) {
+  if (isSQL(query)) {
+    return query; // SPL cannot follow SQL
+  }
+  const strip = (q: string, clause: string) => {
+    const i = indexOfClause(q, clause);
+    return i < 0 ? q : (q.slice(0, i) + q.slice(i + clause.length)).replace(/\s{2,}/g, ' ').trim();
+  };
+  if (indexOfClause(query, wanted) >= 0) {
     return strip(query, wanted) || '*';
   }
   const base = strip(query, opposite) || '*';

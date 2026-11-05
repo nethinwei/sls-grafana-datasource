@@ -147,9 +147,9 @@ func (ds *datasource) handleFieldValues(w http.ResponseWriter, r *http.Request) 
 	// Fields produced by rules only exist in Grafana: their values come from a sample run through
 	// the rules. Other fields are grouped by SQL under their SLS name.
 	err := errDerivedField
-	if target, ok := filterTarget(req.Key, view, cat, ds.learnedField); ok {
+	if target, ok := filterTarget(req.Key, view, cat, ds.learnedFields(logstore)); ok {
 		sql := fmt.Sprintf("%s | select %s as value, count(*) as count group by value order by count desc limit %d", search, target.expr, limit)
-		sql, _ = applyAdhocFilters(sql, req.Filters, view, cat, ds.learnedField)
+		sql, _ = applyAdhocFilters(sql, req.Filters, view, cat, ds.learnedFields(logstore))
 		var resp *logsResponse
 		resp, err = ds.getLogs(ctx, logstore, &sls.GetLogRequest{From: req.From / 1000, To: max(req.To/1000, req.From/1000+1), Query: sql})
 		if err == nil {
@@ -163,10 +163,10 @@ func (ds *datasource) handleFieldValues(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 	}
-	search, _ = applyAdhocFilters(search, req.Filters, view, cat, ds.learnedField)
+	search, _ = applyAdhocFilters(search, req.Filters, view, cat, ds.learnedFields(logstore))
 	logs, sampleErr := ds.sample(ctx, logstore, search, req.From, req.To)
 	if sampleErr != nil {
-		_, _, msg := classifyError(err)
+		_, _, msg := classifyError(sampleErr)
 		writeJSON(w, http.StatusOK, map[string]any{"values": []string{}, "message": msg})
 		return
 	}

@@ -52,6 +52,7 @@ const SYNTHETIC_FIELDS = new Set([
 ]);
 
 const CONTEXT_WINDOW_MS = 24 * 3600 * 1000; // GetContextLogs reads at most one day around the log
+const MAX_LEARNED_FIELDS = 5000;
 const CATALOG_TTL_MS = 5 * 60 * 1000; // same as the backend cache
 
 interface CatalogEntry {
@@ -67,7 +68,7 @@ function isPlainSearch(query: SLSQuery): boolean {
 
 /** Default SQL for new panels and alert rules: event count over time. */
 export const DEFAULT_SQL =
-  '* | select $__timeGroup(__time__) as time, count(*) as count group by time order by time limit 10000';
+  '* | select $__timeGroup(__time__) as time, count(*) as count group by time order by time desc limit 10000';
 
 export class SLSDataSource
   extends DataSourceWithBackend<SLSQuery, SLSDataSourceOptions>
@@ -116,15 +117,25 @@ export class SLSDataSource
     entry.promise = this.postResource<Partial<Catalog>>('api/catalog', { logstore, refresh }).then(
       (c) => {
         entry.value = { fields: c.fields ?? [], indexKnown: Boolean(c.indexKnown), message: c.message };
+        if (!entry.value.fields.length) {
+          this.forget(key, entry); // nothing learned (no permission, no recent logs): ask again next time
+        }
         return entry.value;
       },
       (e) => {
-        this.catalogs.delete(key);
+        this.forget(key, entry);
         throw e;
       }
     );
     this.catalogs.set(key, entry);
     return entry.promise;
+  }
+
+  /** Drops a catalog entry unless a newer request replaced it meanwhile. */
+  private forget(key: string, entry: CatalogEntry) {
+    if (this.catalogs.get(key) === entry) {
+      this.catalogs.delete(key);
+    }
   }
 
   /** A field of an already loaded catalog; undefined when not loaded or unknown. */
@@ -144,6 +155,9 @@ export class SLSDataSource
   private learnFields(frame: DataFrame) {
     const custom = frame.meta?.custom as
       { grafanaOnlyFields?: string[]; fieldExprs?: Record<string, string> } | undefined;
+    if (this.learnedFields.size > MAX_LEARNED_FIELDS) {
+      this.learnedFields.clear(); // past the bound the memory starts over, as in the backend
+    }
     custom?.grafanaOnlyFields?.forEach((name) => this.learnedFields.set(name, ''));
     Object.entries(custom?.fieldExprs ?? {}).forEach(([name, expr]) => this.learnedFields.set(name, expr));
   }
@@ -167,6 +181,9 @@ export class SLSDataSource
       query: interpolateQuery(query.query ?? '', scopedVars, this.templateSrv),
       logstore: interpolateLogstore(query.logstore, scopedVars, this.templateSrv),
     };
+    // Always this request's filters: a query carried over (e.g. from a dashboard into Explore) must
+    // not keep filters the user cannot see.
+    delete out.adhocFilters;
     if (filters?.length && query.queryType !== QUERY_TYPE_LOGS_CONTEXT) {
       out.adhocFilters = filters;
     }
@@ -268,15 +285,26 @@ export class SLSDataSource
 
   // ---------- dashboards: ad hoc filters ----------
 
+  /**
+   * Logstore of dashboard filters: the one the dashboard's queries use when they agree, otherwise
+   * the data source default.
+   */
+  private filterLogstore(queries?: SLSQuery[]): string | undefined {
+    const logstores = new Set((queries ?? []).filter((q) => !q.hide).map((q) => this.resolveLogstore(q.logstore)));
+    const [only] = logstores;
+    return logstores.size === 1 && only ? only : undefined;
+  }
+
   /** Filterable fields: SLS fields under their Grafana names, without SLS meta fields. */
-  async getTagKeys(_options?: DataSourceGetTagKeysOptions<SLSQuery>): Promise<MetricFindValue[]> {
-    const catalog = await this.getCatalog();
+  async getTagKeys(options?: DataSourceGetTagKeysOptions<SLSQuery>): Promise<MetricFindValue[]> {
+    const catalog = await this.getCatalog(this.filterLogstore(options?.queries));
     return catalog.fields.filter((f) => f.slsName && !f.name.startsWith('__')).map((f) => ({ text: f.name }));
   }
 
   /** Most frequent values of a field, restricted by the other filters. */
   async getTagValues(options: DataSourceGetTagValuesOptions<SLSQuery>): Promise<MetricFindValue[]> {
     const res = await this.postResource<{ values?: string[] }>('api/fieldValues', {
+      logstore: this.filterLogstore(options.queries),
       key: options.key,
       filters: options.filters.filter((f) => f.key !== options.key),
       from: options.timeRange?.from.valueOf(),
@@ -399,18 +427,10 @@ function base64(s: string): string {
   return btoa(bin);
 }
 
-/** Variable query in dashboards saved by plugin 2.x: a plain string, or wrapped by schema v2. */
-type StoredVariableQuery = SLSQuery | string | { __legacyStringValue?: string };
-
-export function toVariableQuery(stored: StoredVariableQuery | undefined): SLSQuery {
-  if (typeof stored === 'string') {
-    return { refId: 'variable', query: stored };
-  }
-  if (stored && '__legacyStringValue' in stored && typeof stored.__legacyStringValue === 'string') {
-    return { refId: 'variable', query: stored.__legacyStringValue };
-  }
-  const q = (stored ?? {}) as Partial<SLSQuery>;
-  return { ...q, refId: q.refId || 'variable' };
+/** A variable query; SQL results stay a table, whose first column (or text / value) gives the options. */
+export function toVariableQuery(stored: Partial<SLSQuery> | undefined): SLSQuery {
+  const q = stored ?? {};
+  return { ...q, refId: q.refId || 'variable', format: 'table' };
 }
 
 /**
@@ -426,7 +446,7 @@ export class SLSVariableSupport extends CustomVariableSupport<SLSDataSource, SLS
   }
 
   query(request: DataQueryRequest<SLSQuery>): Observable<DataQueryResponse> {
-    const targets = request.targets.map((t) => toVariableQuery(t as StoredVariableQuery));
+    const targets = request.targets.map((t) => toVariableQuery(t));
     return this.datasource.query({ ...request, targets });
   }
 }

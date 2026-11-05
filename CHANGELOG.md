@@ -1,38 +1,41 @@
 # Changelog
 
-# 2.39.2-fork.1（未发布）
+# v0.1.0 (2026-11-05)
 
-基于上游 2.39.2 的 fork，面向 Grafana 13.2 重写。详见 README 的「从 2.x 迁移」与 docs/design/grafana-13-adaptation.md。
+首个独立版本。衍生自阿里云官方插件 aliyun/aliyun-log-grafana-datasource-plugin 2.39.2，面向 Grafana 13.2 重写并独立维护。以下各版本（2.39.2 及以前）为官方插件的历史记录。
 
-**不兼容变更**
+**与官方插件的区别（不兼容）**
 
+- 插件 ID 改为 `nethinwei-sls-datasource`，与官方插件 `aliyun-log-service-datasource` 是两个插件；迁移见 README「从官方插件迁移」。
 - 只支持 Grafana ≥ 13.2。
-- 删除 MetricStore（PromQL）与自定义请求头、SLS Trace、STS 免登跳转、xcol/ycol 图表模式、`$1m` 与 `#time_begin` / `#time_end` 写法。
-- 构建产物不再提交到仓库，由 Release 工作流从源码构建。
+- 不读取 2.x 的查询写法：xcol/ycol 图表模式、`logsPerPage`/`totalLogs`、`field_search`、`__custom__@` logstore、两列变量约定。
+- 删除 MetricStore（PromQL）与自定义请求头、SLS Trace、STS 免登跳转、`$1m` 与 `#time_begin` / `#time_end` 写法。
+- 许可证按仓库 LICENSE 为 MIT（官方插件的 package.json 误写为 Apache-2.0），来源与署名见 NOTICE；不再使用阿里云的产品 logo。
+- 构建产物不再提交到仓库，由 Release 工作流从源码构建；安装包包含 Go 依赖的许可证。
 
-**新增与改进**
+**查询与告警**
 
-- 后端基于 grafana-plugin-sdk-go v0.296 与 GetLogsV3 重写：返回 HTTP 状态与错误来源（下游 / 插件），查询检查器显示实际语句与 SLS 执行统计，结果不完整时提示而不是报错，支持取消与超时。
+- 后端基于 grafana-plugin-sdk-go v0.296 与 GetLogsV3 重写：返回 HTTP 状态与错误来源（下游 / 插件），查询检查器显示实际语句与 SLS 执行统计，支持取消与超时。
+- SLS 返回不完整结果时自动重试到完整；告警查询仍不完整时报错，看板查询给出提示。网络错误与 5xx 自动重试。
 - 用 SLS 返回的 `hasSQL` 区分检索与 SQL，SPL 按日志返回。
-- SQL 结果按列类型输出；带时间列时自动转为时间序列，按字符串列拆分。
-- 宏：`$__timeGroup`、`$__interval_s`、`$__timeFrom`、`$__timeTo`；数据源配置新增 SQL 时区。
-- 日志正文只包含这条日志自己的字段，不含元数据与空字段；时间支持纳秒。
-- 健康检查与 logstore 列表支持只授权到 logstore 的 AccessKey。
-- 前端迁移到 @grafana/create-plugin、@grafana/* 13.2、React 19；新的查询编辑器（SLS 语法高亮与补全）、配置页与变量编辑器；检索中的 `key: $var` 多值变量自动展开。
-- 日志浏览：完整时间范围的日志量直方图（按级别）；Explore 中点字段 ➕/➖ 筛选；看板 Ad hoc 筛选（字段来自索引，取值按频次，支持简单正则转通配符）；日志上下文（GetContextLogs）；查询编辑器字段名补全；数据源配置新增级别字段。
-- 日志处理：数据源配置新增「Logs」（`jsonData.logs`）：级别字段、时间字段、日志行字段（例如 `host_name`、`host_ip` 放在行首）与字段规则 `time` / `rename` / `extract` / `drop` / `default` / `template`。纳秒时间由默认的 `time` 规则合成，采集端没有纳秒字段时按 0 处理。
-- 字段目录（`/api/catalog`，取代 `/api/fields`）：索引与样本日志合并，再按规则换算，带缓存。补全显示 Grafana 字段名并插入 SLS 字段名；编辑器提示无索引检索、Grafana 字段名误用与无统计的 SQL 字段；新增字段浏览。
-- 看板筛选改由后端按字段目录翻译：改名字段用 SLS 原名，无索引字段用 SPL `| where`，复杂正则用 `regexp_like`，无法翻译时在面板上提示；字段取值候选同样支持改名字段与规则产生的字段。
-- 日志行按日志写入时的字段顺序拼接（GetLogs / GetContextLogs 自行解析响应以保留顺序）；级别字段不再重复出现在日志行中。
-- 「Add OpenTelemetry renames」生成 `host_name`、`host_ip`、`log_file_path`（点号换成下划线，与 Loki 一致）。
-- 日志行字段可排序（Line fields），可设置不进日志行的字段（Hidden from line）。
-- 日志行的值按 logfmt 转义（不再把 `"` 替换成 `'`），嵌套 JSON 对象和数组原样输出。
-- 新增 `json` 规则（默认规则包含它）：按 Loki `| json` 的规则把嵌套对象展开成字段；展开的字段可用 ➕/➖ 和看板筛选（有 JSON 索引时用检索，否则用 SPL `json_extract_scalar`）。
-- 不走检索的筛选：否定条件对缺失字段按空值处理，正则匹配整个值，与 Loki 一致。
-- 展开字段的筛选同时匹配采集端已展开的同名字段，新旧两种存储混合时也能筛选；README 补充采集端展开（`processor_json`）的配置与实测行为。
-- 日志行带 `id`（pack ID + pack meta），检索与 SPL 自动追加 `| with_pack_meta`。
-- 修复检索翻页时用第一页而不是上一页判断是否继续的问题。
-- 去掉内网依赖，外部可以构建；STS 签名请求改用 https（该功能随后已删除）。
+- SQL 结果按列类型输出，超过 2^53 的整数按字符串保留原值；Format 选择 Time series（带时间列时按字符串列拆分序列）或 Table。时间列兼容常见格式，无法解析的行跳过并提示。
+- 宏：`$__timeGroup`（支持表达式参数）、`$__interval_s`、`$__timeFrom`、`$__timeTo`；数据源配置新增 SQL 时区。默认 SQL 按时间倒序截断。
+- 单次结果的内存上限可配置：SQL 转时间序列的单元格数、`json` 展开的字段数。
+- 健康检查与 logstore 列表支持只授权到 logstore 的 AccessKey；endpoint 默认使用 https。
+
+**日志**
+
+- 日志浏览：完整时间范围的日志量直方图（按级别）；Explore 中点字段 ➕/➖ 筛选；看板 Ad hoc 筛选；日志上下文（GetContextLogs）；日志行带 `id`，检索与 SPL 自动追加 `| with_pack_meta`。
+- 日志处理（`jsonData.logs`）：级别字段、时间字段、可排序的日志行字段（Line fields）与不进日志行的字段（Hidden from line）；字段规则 `time` / `rename` / `extract` / `drop` / `default` / `template` / `json`。纳秒时间由默认的 `time` 规则合成。
+- 日志行按日志写入时的字段顺序拼接，值按 logfmt 转义，嵌套 JSON 原样输出；级别字段不重复出现在日志行。
+- `json` 规则（默认包含）按 Loki `| json` 的规则展开嵌套对象；展开的字段可筛选（有 JSON 索引时用检索，否则用 SPL `json_extract_scalar`，同时匹配采集端已展开的同名字段）。
+- 「Add OpenTelemetry renames」生成 `host_name`、`host_ip`、`log_file_path`。
+- 筛选由后端按字段目录翻译：改名字段用 SLS 原名，无索引字段用 SPL `| where`，正则用 `regexp_like` 匹配整个值，否定条件对缺失字段按空值处理，与 Loki 一致；无法翻译时在面板上提示。
+
+**编辑器**
+
+- 前端迁移到 @grafana/create-plugin、@grafana/* 13.2、React 19；新的查询编辑器（SLS 语法高亮）、配置页与变量编辑器；检索中的 `key: $var` 多值变量自动展开。
+- 字段目录（`/api/catalog`）：索引与样本日志合并，再按规则换算。补全显示 Grafana 字段名并插入 SLS 字段名；编辑器提示无索引检索、Grafana 字段名误用与无统计的 SQL 字段；字段浏览。
 
 # 2.39.2 (2026-09-09)
 
@@ -46,7 +49,7 @@
 # 2.39 (2025-12-12)
 - 支持 “gotoSLS” 跳转国际站 project
   - 数据源配置页面新增 International 字段，用于跳转到国际站。
-    ![international字段](./img/2.39/international_2.39.jpg)
+    ![international字段](https://raw.githubusercontent.com/aliyun/aliyun-log-grafana-datasource-plugin/a73857e05f2e1f8253534d909f5388553991ce93/img/2.39/international_2.39.jpg)
 
 # 2.38 (2025-03-03)
 - 修复时序库跳转 SLS 路径问题。
@@ -62,12 +65,12 @@
 
 - 支持 v4 签名，提供更高的安全性。
   - 数据源配置页面新增 Region 字段，兼容非受信环境独立签名。
-    ![region字段](./img/2.36/region_2.36.png)
+    ![region字段](https://raw.githubusercontent.com/aliyun/aliyun-log-grafana-datasource-plugin/a73857e05f2e1f8253534d909f5388553991ce93/img/2.36/region_2.36.png)
 - 变量替换支持自定义'日志库列表'选项。
   - Variables 设置页面选择 'Custom' 类型。'name' 字段作为独立标识，必须包含 logstore 字符串，不区分大小写。'Custom options' 手动填写可选变量，以逗号区分。
-    ![variable配置](./img/2.36/variable_2.36.jpg)
+    ![variable配置](https://raw.githubusercontent.com/aliyun/aliyun-log-grafana-datasource-plugin/a73857e05f2e1f8253534d909f5388553991ce93/img/2.36/variable_2.36.jpg)
   - Panel 界面修改'日志库列表'选项为自定义Variable，修改相应变量并刷新仪表盘，即可获得最新结果。
-    ![自定义logstore](./img/2.36/custom.jpg)
+    ![自定义logstore](https://raw.githubusercontent.com/aliyun/aliyun-log-grafana-datasource-plugin/a73857e05f2e1f8253534d909f5388553991ce93/img/2.36/custom.jpg)
     
 
 # 2.35 (2024-10-21)
@@ -79,7 +82,7 @@
 - 优化 table/log 视图
   - 支持当存在纳秒字段时, time 按纳秒精度排序。
   - 支持修改总查询记录数 totalLogs, 默认值为 100, 最小值为 1, 最大值为 5000, 仅对 Query 查询语句生效, 分析语句无效
-    ![image.png](./img/2.34/totalLogs_2.34.png)
+    ![image.png](https://raw.githubusercontent.com/aliyun/aliyun-log-grafana-datasource-plugin/a73857e05f2e1f8253534d909f5388553991ce93/img/2.34/totalLogs_2.34.png)
 - 修复 gotoSLS 仅可跳转至数据源中设置的默认 Logstore 的问题
 - 修复 gotoSLS 跳转后变量替换为具体值的问题
 
@@ -87,9 +90,9 @@
 
 - 插件配置界面优化,必填项为 `Endpoint Project AccessKeyID AccessKeySecret`, 不再强制要求填写 `LogStore`;如果不填写 `LogStore`, 请确保你的填写的 Ak 具备当前 Project 的 ListProject 权限，参考 [ListLogStores - 列出 LogStore](https://help.aliyun.com/zh/sls/developer-reference/api-sls-2020-12-30-listlogstores)
 - 插件支持自定义 Headers, 但仅在数据源类型为`MetricStore(PrmQL)` 生效
-  ![图 2](./img/2.33/config_editor_2.33.png)
+  ![图 2](https://raw.githubusercontent.com/aliyun/aliyun-log-grafana-datasource-plugin/a73857e05f2e1f8253534d909f5388553991ce93/img/2.33/config_editor_2.33.png)
 - 插件编辑界面优化,支持切换数据源类型和在编辑界面下拉选择具体[日志库(Logstore)](https://help.aliyun.com/zh/sls/product-overview/logstore)或[时序库(MetricStore)](https://help.aliyun.com/zh/sls/product-overview/metricstore?spm=a2c4g.11186623.0.0.2e8b60d1YQznSr)
-  ![图 3](./img/2.33/query_editor_2.33.png)
+  ![图 3](https://raw.githubusercontent.com/aliyun/aliyun-log-grafana-datasource-plugin/a73857e05f2e1f8253534d909f5388553991ce93/img/2.33/query_editor_2.33.png)
 
   - 数据源类型主要是两种语法区别`SQL` 和 `PromQL`,再加上存储库的类型不同，有四种类型可选: `ALL(SQL)`、`Logstore(SQL)`、`MetricStore(SQL)`、`MetricStore(PromQL)` ;
   - 日志库(Logstore)支持`SQL`[日志库(Logstore)查询分析](https://help.aliyun.com/zh/sls/user-guide/search-and-analysis);

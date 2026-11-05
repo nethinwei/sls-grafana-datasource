@@ -12,7 +12,7 @@ jest.mock('@grafana/runtime', () => ({
 const settings = {
   id: 1,
   uid: 'sls',
-  type: 'aliyun-log-service-datasource',
+  type: 'nethinwei-sls-datasource',
   name: 'SLS',
   jsonData: { project: 'p', logstore: 'default-ls' },
   meta: {} as never,
@@ -44,15 +44,13 @@ describe('SLSDataSource', () => {
 
 describe('toVariableQuery', () => {
   it.each([
-    ['* | select a from log', { refId: 'variable', query: '* | select a from log' }],
-    [{ __legacyStringValue: '* | select b from log' }, { refId: 'variable', query: '* | select b from log' }],
     [
       { refId: 'X', query: 'q', logstore: 'ls' },
-      { refId: 'X', query: 'q', logstore: 'ls' },
+      { refId: 'X', query: 'q', logstore: 'ls', format: 'table' },
     ],
-    [undefined, { refId: 'variable' }],
+    [undefined, { refId: 'variable', format: 'table' }],
   ])('%j', (stored, want) => {
-    expect(toVariableQuery(stored as never)).toEqual(want);
+    expect(toVariableQuery(stored)).toEqual(want);
   });
 });
 
@@ -96,6 +94,8 @@ describe('log features', () => {
     const q = ds.applyTemplateVariables({ refId: 'A', query: '* | select count(*) as c' }, {}, filters);
     expect(q.query).toBe('* | select count(*) as c');
     expect(q.adhocFilters).toEqual(filters);
+    // Filters carried over in the query (e.g. into Explore) do not survive a request without them.
+    expect(ds.applyTemplateVariables({ ...q }, {}).adhocFilters).toBeUndefined();
   });
 });
 
@@ -170,5 +170,17 @@ describe('field catalog', () => {
     expect(post).toHaveBeenCalledTimes(1);
     await ds.getCatalog(undefined, true);
     expect(post).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('catalog requests', () => {
+  it('uses the logstore of the dashboard queries and does not keep empty catalogs', async () => {
+    const ds = new SLSDataSource(settings, passthrough);
+    const post = jest.fn().mockResolvedValue({ fields: [], indexKnown: false });
+    ds.postResource = post as never;
+    await ds.getTagKeys({ queries: [{ refId: 'A', logstore: 'other' }], filters: [] } as never);
+    expect(post).toHaveBeenLastCalledWith('api/catalog', { logstore: 'other', refresh: false });
+    await ds.getTagKeys({ queries: [{ refId: 'A', logstore: 'other' }], filters: [] } as never);
+    expect(post).toHaveBeenCalledTimes(2); // an empty catalog is asked again
   });
 });

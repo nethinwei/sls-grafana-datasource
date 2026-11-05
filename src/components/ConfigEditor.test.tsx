@@ -106,4 +106,24 @@ describe('ConfigEditor logs', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Add field' }));
     expect(lastJson(onChange).logs?.line?.fields).toEqual(['host_name', 'msg', '']);
   });
+
+  it('sets the memory limits', () => {
+    const onChange = jest.fn();
+    const { rerender } = render(<ConfigEditor options={options()} onOptionsChange={onChange} />);
+    fireEvent.change(screen.getByPlaceholderText('200'), { target: { value: '50' } });
+    expect(lastJson(onChange).limits).toEqual({ maxFlattenedFields: 50 });
+
+    const opts = options();
+    opts.jsonData.limits = { maxFlattenedFields: 50 };
+    rerender(<ConfigEditor options={opts} onOptionsChange={onChange} />);
+    fireEvent.change(screen.getByPlaceholderText('200'), { target: { value: '' } });
+    expect(lastJson(onChange).limits).toBeUndefined();
+  });
+
+  it('shows unknown rule types instead of failing', () => {
+    const opts = options();
+    opts.jsonData.logs = { rules: [{ type: 'upper' as never }] };
+    render(<ConfigEditor options={opts} onOptionsChange={jest.fn()} />);
+    expect(screen.getByText(/unknown rule type "upper"/)).toBeInTheDocument();
+  });
 });

@@ -21,12 +21,27 @@ type settings struct {
 	// from_unixtime, date_format), which carry no offset. SLS uses UTC+8 by default.
 	SQLTimeZone string     `json:"sqlTimeZone"`
 	Logs        logsConfig `json:"logs"`
+	Limits      limits     `json:"limits"`
 
 	view            logsView // Logs compiled once per instance
 	sqlLocation     *time.Location
 	AccessKeyID     string
 	AccessKeySecret string
 }
+
+// limits bound the memory one query result may take; 0 means the default.
+type limits struct {
+	// MaxWideCells bounds the cells of an SQL result turned into wide time series: distinct times ×
+	// combinations of string columns × number columns.
+	MaxWideCells int `json:"maxWideCells"`
+	// MaxFlattenedFields bounds the distinct fields the json rule creates per result.
+	MaxFlattenedFields int `json:"maxFlattenedFields"`
+}
+
+const (
+	defaultMaxWideCells       = 6_000_000 // as plugin 2.x's maxPointsLimit
+	defaultMaxFlattenedFields = 200
+)
 
 // logsConfig is how log rows are processed and presented (jsonData.logs).
 type logsConfig struct {
@@ -54,6 +69,11 @@ func loadSettings(s backend.DataSourceInstanceSettings) (*settings, error) {
 		}
 	}
 	cfg.Endpoint = strings.TrimSpace(s.URL)
+	// The SDK defaults to plain http; AccessKey-signed requests and log data go over https unless
+	// the endpoint names http explicitly.
+	if cfg.Endpoint != "" && !strings.Contains(cfg.Endpoint, "://") {
+		cfg.Endpoint = "https://" + cfg.Endpoint
+	}
 	cfg.AccessKeyID = s.DecryptedSecureJSONData["accessKeyId"]
 	cfg.AccessKeySecret = s.DecryptedSecureJSONData["accessKeySecret"]
 
@@ -65,7 +85,14 @@ func loadSettings(s backend.DataSourceInstanceSettings) (*settings, error) {
 		return nil, fmt.Errorf("invalid SQL time zone %q: %w", cfg.SQLTimeZone, err)
 	}
 	cfg.sqlLocation = loc
+	if cfg.Limits.MaxWideCells <= 0 {
+		cfg.Limits.MaxWideCells = defaultMaxWideCells
+	}
+	if cfg.Limits.MaxFlattenedFields <= 0 {
+		cfg.Limits.MaxFlattenedFields = defaultMaxFlattenedFields
+	}
 	cfg.view = compileLogsView(cfg.Logs)
+	cfg.view.maxFlattened = cfg.Limits.MaxFlattenedFields
 
 	switch {
 	case cfg.Endpoint == "":

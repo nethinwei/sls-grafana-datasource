@@ -77,3 +77,19 @@ describe('toggleWhereFilter', () => {
     expect(hasWhereFilter(`* | where "a" != '1'`, 'a', '1')).toBe(false);
   });
 });
+
+describe('review fixes', () => {
+  it('treats single quotes as ordinary characters in search', () => {
+    expect(splitStatement("msg: it's | select 1")).toEqual({ search: "msg: it's", rest: '| select 1' });
+  });
+
+  it('does not take a clause for a longer value as its own', () => {
+    const q = toggleWhereFilter('*', 'k', "a'b", false);
+    expect(hasWhereFilter(q, 'k', 'a')).toBe(false);
+    expect(toggleWhereFilter(q, 'k', 'a', false)).toBe(`* | where "k" = 'a''b' | where "k" = 'a'`);
+  });
+
+  it('leaves SQL alone', () => {
+    expect(toggleWhereFilter('* | select count(*)', 'k', 'v', false)).toBe('* | select count(*)');
+  });
+});

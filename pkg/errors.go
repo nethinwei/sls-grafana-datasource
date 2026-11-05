@@ -24,6 +24,7 @@ func errorResponse(err error) backend.DataResponse {
 
 func classifyError(err error) (backend.Status, backend.ErrorSource, string) {
 	var slsErr *sls.Error
+	var badResp *sls.BadResponseError
 	switch {
 	case errors.As(err, &slsErr) && slsErr.HTTPCode > 0:
 		msg := fmt.Sprintf("SLS %s: %s", slsErr.Code, slsErr.Message)
@@ -34,6 +35,10 @@ func classifyError(err error) (backend.Status, backend.ErrorSource, string) {
 			msg += " (request ID " + slsErr.RequestID + ")"
 		}
 		return backend.Status(slsErr.HTTPCode), backend.ErrorSourceDownstream, msg
+	case errors.As(err, &badResp):
+		// A response SLS did not produce as JSON, e.g. an HTML 502 from a load balancer.
+		return backend.Status(badResp.HTTPCode), backend.ErrorSourceDownstream,
+			fmt.Sprintf("SLS returned HTTP %d: %s", badResp.HTTPCode, truncate(badResp.RespBody, 200))
 	case errors.As(err, &slsErr):
 		// HTTPCode -1: the request never got an HTTP response (DNS, TLS, connection, client timeout).
 		return backend.StatusBadGateway, backend.ErrorSourceDownstream, "SLS request failed: " + slsErr.Message
@@ -57,4 +62,11 @@ func classifyError(err error) (backend.Status, backend.ErrorSource, string) {
 // userError marks an error caused by the query or settings the user wrote (HTTP 400, downstream).
 func userError(format string, a ...any) error {
 	return backend.DownstreamErrorf(format, a...)
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
 }
