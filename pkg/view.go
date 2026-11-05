@@ -79,8 +79,11 @@ func (v *logsView) table(logs []map[string]string) (*table, *applyContext) {
 	return t, ctx
 }
 
-// fieldExpr returns the SPL expression reading a flattened JSON field from its SLS field, e.g.
-// json_extract_scalar("request", '$["header"]["Content-Type"]'); "" for other fields.
+// fieldExpr returns the SPL expression reading a flattened JSON field, "" for other fields. The
+// same field may also be stored flat when the collector expands JSON (processor_json), as during
+// a migration, so both forms are read:
+//
+//	coalesce("request_method", json_extract_scalar("request", '$["method"]'))
 func (v *logsView) fieldExpr(name string, ctx *applyContext) string {
 	p, ok := ctx.flattened[name]
 	if !ok {
@@ -95,5 +98,5 @@ func (v *logsView) fieldExpr(name string, ctx *applyContext) string {
 	for _, k := range p.keys {
 		path.WriteString(`["` + strings.ReplaceAll(strings.ReplaceAll(k, `\`, `\\`), `"`, `\"`) + `"]`)
 	}
-	return "json_extract_scalar(" + quoteIdentifier(src) + ", " + splString(path.String()) + ")"
+	return "coalesce(" + quoteIdentifier(name) + ", json_extract_scalar(" + quoteIdentifier(src) + ", " + splString(path.String()) + "))"
 }
