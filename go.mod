@@ -269,7 +269,6 @@ require (
 	github.com/urfave/cli v1.22.1 // indirect
 	github.com/xiang90/probing v0.0.0-20190116061207-43a291ad63a2 // indirect
 	github.com/yuin/goldmark v1.4.13 // indirect
-	gitlab.alibaba-inc.com/rapt/go-security-utils v0.1.4 // indirect
 	go.etcd.io/bbolt v1.3.3 // indirect
 	go.etcd.io/etcd v0.0.0-20191023171146-3cf2f69b5738 // indirect
 	go.etcd.io/etcd/api/v3 v3.5.0 // indirect
