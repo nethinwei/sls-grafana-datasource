@@ -1,11 +1,10 @@
 import { DataSourcePlugin } from '@grafana/data';
+
+import { ConfigEditor } from './components/ConfigEditor';
+import { QueryEditor } from './components/QueryEditor';
 import { SLSDataSource } from './datasource';
-import { SLSConfigEditor } from './ConfigEditor';
-import { SLSQueryEditor } from './QueryEditor';
-import { SLSQuery, SLSDataSourceOptions } from './types';
-import { SLSVariableQueryEditorWapper } from './VariableQueryEditor';
+import type { SLSDataSourceOptions, SLSQuery } from './types';
 
 export const plugin = new DataSourcePlugin<SLSDataSource, SLSQuery, SLSDataSourceOptions>(SLSDataSource)
-  .setConfigEditor(SLSConfigEditor)
-  .setQueryEditor(SLSQueryEditor)
-  .setVariableQueryEditor(SLSVariableQueryEditorWapper);
+  .setConfigEditor(ConfigEditor)
+  .setQueryEditor(QueryEditor);
