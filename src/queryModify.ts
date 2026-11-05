@@ -135,13 +135,18 @@ function splString(value: string): string {
   return "'" + value.replace(/'/g, "''") + "'";
 }
 
-function whereClause(key: string, value: string, negate: boolean): string {
-  return `| where "${key.replace(/"/g, '""')}" ${negate ? '!=' : '='} ${splString(value)}`;
+/**
+ * `expr` replaces the quoted field, e.g. json_extract_scalar("http", '$["method"]'). A missing
+ * field is null in SPL; ➖ compares it as "" so that, as in Loki, logs without the field remain.
+ */
+function whereClause(key: string, value: string, negate: boolean, expr?: string): string {
+  const col = expr ?? `"${key.replace(/"/g, '""')}"`;
+  return negate ? `| where coalesce(${col}, '') != ${splString(value)}` : `| where ${col} = ${splString(value)}`;
 }
 
 /** Whether the statement has `| where "key" = 'value'` added by toggleWhereFilter. */
-export function hasWhereFilter(query: string, key: string, value: string): boolean {
-  return query.includes(whereClause(key, value, false));
+export function hasWhereFilter(query: string, key: string, value: string, expr?: string): boolean {
+  return query.includes(whereClause(key, value, false, expr));
 }
 
 /**
@@ -149,9 +154,9 @@ export function hasWhereFilter(query: string, key: string, value: string): boole
  * Appends `| where "key" = 'value'` (or `!=`); clicking the same one again removes it, and the
  * opposite clause on the same value is replaced.
  */
-export function toggleWhereFilter(query: string, key: string, value: string, negate: boolean): string {
-  const wanted = whereClause(key, value, negate);
-  const opposite = whereClause(key, value, !negate);
+export function toggleWhereFilter(query: string, key: string, value: string, negate: boolean, expr?: string): string {
+  const wanted = whereClause(key, value, negate, expr);
+  const opposite = whereClause(key, value, !negate, expr);
   const strip = (q: string, clause: string) =>
     q
       .replace(' ' + clause, '')

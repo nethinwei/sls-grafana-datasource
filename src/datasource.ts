@@ -2,6 +2,7 @@ import {
   type AdHocVariableFilter,
   CoreApp,
   CustomVariableSupport,
+  type DataFrame,
   type DataQueryRequest,
   type DataQueryResponse,
   type DataSourceGetTagKeysOptions,
@@ -25,7 +26,7 @@ import {
   type ToggleFilterAction,
 } from '@grafana/data';
 import { DataSourceWithBackend, getTemplateSrv, type TemplateSrv } from '@grafana/runtime';
-import { lastValueFrom, type Observable } from 'rxjs';
+import { lastValueFrom, type Observable, tap } from 'rxjs';
 
 import { VariableQueryEditor } from './components/VariableQueryEditor';
 import { addStringFilter, hasFieldFilter, hasWhereFilter, toggleFieldFilter, toggleWhereFilter } from './queryModify';
@@ -81,6 +82,11 @@ export class SLSDataSource
   readonly levelField: string;
   /** Field catalogs per logstore ('' = default), see getCatalog. */
   private readonly catalogs = new Map<string, CatalogEntry>();
+  /**
+   * What query results said about fields the rules produced (see buildLogsFrame in the backend):
+   * name → SPL expression for flattened JSON fields, '' for fields that exist only in Grafana.
+   */
+  private readonly learnedFields = new Map<string, string>();
 
   constructor(
     settings: DataSourceInstanceSettings<SLSDataSourceOptions>,
@@ -131,6 +137,17 @@ export class SLSDataSource
     return resolved === this.defaultLogstore ? '' : resolved;
   }
 
+  query(request: DataQueryRequest<SLSQuery>): Observable<DataQueryResponse> {
+    return super.query(request).pipe(tap((res) => res.data?.forEach((frame) => this.learnFields(frame))));
+  }
+
+  private learnFields(frame: DataFrame) {
+    const custom = frame.meta?.custom as
+      { grafanaOnlyFields?: string[]; fieldExprs?: Record<string, string> } | undefined;
+    custom?.grafanaOnlyFields?.forEach((name) => this.learnedFields.set(name, ''));
+    Object.entries(custom?.fieldExprs ?? {}).forEach(([name, expr]) => this.learnedFields.set(name, expr));
+  }
+
   /** Explore starts with a log search; panels and alert rules with an event count over time. */
   getDefaultQuery(app: CoreApp): Partial<SLSQuery> {
     return app === CoreApp.Explore ? { query: '*' } : { query: DEFAULT_SQL };
@@ -167,24 +184,40 @@ export class SLSDataSource
    * (host.name) go back to their SLS name (__tag__:__hostname__). Fields added by the plugin or
    * produced by rules exist only in Grafana and cannot be filtered.
    */
-  private filterTarget(key: string, logstore?: string): { key: string; indexed: boolean } | undefined {
+  private filterTarget(
+    key: string,
+    logstore?: string,
+    frame?: DataFrame
+  ): { key: string; indexed: boolean; expr?: string } | undefined {
     const name = key === 'detected_level' ? this.levelField : key;
     if (SYNTHETIC_FIELDS.has(name)) {
       return undefined;
     }
     const field = this.catalogField(name, logstore);
-    if (!field) {
-      return { key: name, indexed: true }; // catalog not loaded yet or field not seen: try as is
+    if (field) {
+      if (field.slsName) {
+        return { key: field.slsName, indexed: field.indexed !== false };
+      }
+      return field.expr ? { key: name, indexed: false, expr: field.expr } : undefined;
     }
-    return field.slsName ? { key: field.slsName, indexed: field.indexed !== false } : undefined;
+    // Fields the rules produced in this or earlier results (see buildLogsFrame in the backend).
+    if (frame) {
+      this.learnFields(frame);
+    }
+    const learned = this.learnedFields.get(name);
+    if (learned !== undefined) {
+      return learned ? { key: name, indexed: false, expr: learned } : undefined;
+    }
+    return { key: name, indexed: true }; // catalog not loaded yet or field not seen: try as is
   }
 
   /**
    * Indexed fields get a search condition (`key: "value"`); fields without an index an SPL
-   * `| where` clause, since SLS search cannot use them.
+   * `| where` clause, since SLS search cannot use them; flattened JSON fields a where clause on
+   * json_extract_scalar, like Loki's `| json | key="value"`.
    */
   toggleQueryFilter(query: SLSQuery, filter: ToggleFilterAction): SLSQuery {
-    const target = this.filterTarget(filter.options.key, query.logstore);
+    const target = this.filterTarget(filter.options.key, query.logstore, filter.frame);
     if (!target) {
       return query;
     }
@@ -194,7 +227,7 @@ export class SLSDataSource
       ...query,
       query: target.indexed
         ? toggleFieldFilter(text, target.key, filter.options.value, negate)
-        : toggleWhereFilter(text, target.key, filter.options.value, negate),
+        : toggleWhereFilter(text, target.key, filter.options.value, negate, target.expr),
     };
   }
 
@@ -204,7 +237,9 @@ export class SLSDataSource
       return false;
     }
     const text = query.query ?? '';
-    return hasFieldFilter(text, target.key, filter.value) || hasWhereFilter(text, target.key, filter.value);
+    return (
+      hasFieldFilter(text, target.key, filter.value) || hasWhereFilter(text, target.key, filter.value, target.expr)
+    );
   }
 
   getSupportedQueryModifications(): string[] {
@@ -219,6 +254,7 @@ export class SLSDataSource
         return this.toggleQueryFilter(query, {
           type: action.type === 'ADD_FILTER' ? 'FILTER_FOR' : 'FILTER_OUT',
           options: { key: action.options?.key ?? '', value },
+          frame: action.frame,
         });
       case 'ADD_STRING_FILTER':
       case 'ADD_STRING_FILTER_OUT':

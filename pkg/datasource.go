@@ -39,6 +39,9 @@ type datasource struct {
 	project   *sls.LogProject
 	resources backend.CallResourceHandler
 	catalogs  catalogCache
+	// learned remembers fields that query results produced (name → SPL expression, "" when SLS
+	// cannot filter on it), for filters on fields the catalog's sample missed.
+	learned sync.Map
 }
 
 func newDatasource(_ context.Context, s backend.DataSourceInstanceSettings) (instancemgmt.Instance, error) {
@@ -149,7 +152,7 @@ func (ds *datasource) runQuery(ctx context.Context, q backend.DataQuery) (res ba
 		if err != nil {
 			log.DefaultLogger.Debug("field catalog unavailable, assuming indexed fields for ad hoc filters", "error", err)
 		}
-		query, skipped = applyAdhocFilters(query, m.AdhocFilters, &ds.cfg.view, cat)
+		query, skipped = applyAdhocFilters(query, m.AdhocFilters, &ds.cfg.view, cat, ds.learnedField)
 	}
 	if m.QueryType == queryTypeLogsVolume {
 		frames, err := ds.logsVolume(ctx, logstore, query, q)
@@ -167,6 +170,30 @@ func (ds *datasource) runQuery(ctx context.Context, q backend.DataQuery) (res ba
 		frame.Meta.Notices = append(frame.Meta.Notices, data.Notice{Severity: data.NoticeSeverityWarning, Text: "Ad hoc filter ignored: " + s})
 	}
 	return backend.DataResponse{Frames: data.Frames{frame}}
+}
+
+// learnFields remembers what a logs frame says about the fields rules produced (see
+// buildLogsFrame), for filters on fields the catalog's sample missed.
+func (ds *datasource) learnFields(frame *data.Frame) {
+	custom, _ := frame.Meta.Custom.(map[string]any)
+	if names, ok := custom[grafanaOnlyFieldsKey].([]string); ok {
+		for _, n := range names {
+			ds.learned.Store(n, "")
+		}
+	}
+	if exprs, ok := custom[fieldExprsKey].(map[string]string); ok {
+		for n, e := range exprs {
+			ds.learned.Store(n, e)
+		}
+	}
+}
+
+func (ds *datasource) learnedField(name string) (string, bool) {
+	v, ok := ds.learned.Load(name)
+	if !ok {
+		return "", false
+	}
+	return v.(string), true
 }
 
 // execute sends the query with GetLogsV3. Whether it is SQL is decided by SLS (meta.hasSQL), not by
@@ -208,6 +235,7 @@ func (ds *datasource) execute(ctx context.Context, logstore, query string, m *qu
 			keys = append(keys, last.Keys...)
 		}
 		frame = buildLogsFrame(logs, keys, &ds.cfg.view)
+		ds.learnFields(frame)
 	}
 
 	if frame.Meta == nil {

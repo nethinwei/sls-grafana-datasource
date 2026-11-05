@@ -43,7 +43,7 @@ func TestBuildLogsFrame(t *testing.T) {
 		t.Errorf("time = %v, want nanosecond precision", got)
 	}
 	// Without the SLS key order the line is sorted; the level is shown by Grafana, not in the line.
-	want := []string{`code="12001" msg="pay 'failed'"`, `channel="coda" error="" msg="slow"`}
+	want := []string{`code="12001" msg="pay \"failed\""`, `channel="coda" error="" msg="slow"`}
 	for i, w := range want {
 		if got := field(t, f, "message").At(i).(string); got != w {
 			t.Errorf("message[%d] = %q, want %q", i, got, w)
@@ -372,5 +372,36 @@ func TestDecodeRowsSharesKeys(t *testing.T) {
 	}
 	if fmt.Sprint(keys[2]) != "[a c]" || logs[2]["c"] != "6" || logs[1]["b"] != "4" {
 		t.Errorf("%v %v", keys, logs)
+	}
+}
+
+func TestLogsLineExclude(t *testing.T) {
+	logs := []map[string]string{{"__time__": "1700000000", "msg": "paid", "source": "a.go:1", "order_id": "TP1"}}
+	keys := [][]string{{"msg", "source", "order_id", "__time__"}}
+	rest := true
+	cfg := logsConfig{}
+	cfg.Line.Fields, cfg.Line.Rest, cfg.Line.Exclude = []string{"msg", "source"}, &rest, []string{"source"}
+	v := compileLogsView(cfg)
+	f := buildLogsFrame(logs, keys, &v)
+	if got := field(t, f, "message").At(0).(string); got != `msg="paid" order_id="TP1"` {
+		t.Errorf("line = %q", got)
+	}
+	if field(t, f, "source").At(0) != "a.go:1" {
+		t.Error("excluded fields stay as columns")
+	}
+}
+
+func TestLineValues(t *testing.T) {
+	cases := map[string]string{
+		`plain`:                                `"plain"`,
+		`say "hi" \ bye`:                       `"say \"hi\" \\ bye"`,
+		`{"method":"POST","header":{"a":"b"}}`: `{"method":"POST","header":{"a":"b"}}`,
+		`["a","b"]`:                            `["a","b"]`,
+		`{not json}`:                           `"{not json}"`,
+	}
+	for in, want := range cases {
+		if got := string(appendValue(nil, in)); got != want {
+			t.Errorf("appendValue(%s) = %s, want %s", in, got, want)
+		}
 	}
 }

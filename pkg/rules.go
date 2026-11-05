@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -17,6 +19,7 @@ import (
 //	extract   __tag__:__path__ /logs/(.+)\.log → service.name ($1)
 //	default   deployment.environment = prod (when absent or empty)
 //	template  ${service}/${env} → app
+//	json      request {"method":"POST","header":{...}} → request_method, request_header_...
 //
 // Adding a rule type: write a constructor returning a rule and register it in ruleTypes. apply
 // changes the rows; describe tells the field catalog what the rule removes, renames or produces,
@@ -50,6 +53,14 @@ type rule interface {
 type applyContext struct {
 	timeField string
 	times     rowTimes // written by a time rule whose target is timeField
+	// flattened maps the fields a json rule created in this run to where they come from.
+	flattened map[string]jsonPath
+}
+
+// jsonPath locates a flattened field: a key path inside the JSON object of a field.
+type jsonPath struct {
+	field string // field shown in Grafana that holds the JSON object
+	keys  []string
 }
 
 var ruleTypes = map[string]func(r fieldRule) (rule, error){
@@ -59,17 +70,20 @@ var ruleTypes = map[string]func(r fieldRule) (rule, error){
 	"drop":     newDropRule,
 	"default":  newDefaultRule,
 	"template": newTemplateRule,
+	"json":     newJSONRule,
 }
 
 // defaultTimeField is the field that becomes the row timestamp unless configured otherwise.
 const defaultTimeField = "timestamp"
 
 // defaultFieldRules apply when no rules are configured: build the row timestamp from SLS's seconds
-// and (when the collector sends them) nanoseconds, and hide the raw fields.
+// and (when the collector sends them) nanoseconds, hide the raw fields, and flatten nested JSON
+// objects into fields as Loki's | json does.
 var defaultFieldRules = []fieldRule{
 	{Type: "time", From: "__time__", Nanos: "__time_ns_part__", To: defaultTimeField},
 	{Type: "drop", Field: "__time__"},
 	{Type: "drop", Field: "__time_ns_part__"},
+	{Type: "json"},
 }
 
 // contextFields are needed by log context and must keep their SLS names.
@@ -406,6 +420,123 @@ func (r templateRule) apply(t *table, _ *applyContext) {
 }
 
 func (r templateRule) describe(c *catalogBuilder) { c.derive(r.to, "template") }
+
+// ---------- json ----------
+
+// jsonRule flattens JSON objects into fields the way Loki's `| json` parser does: nested keys are
+// joined with "_" (request_header_content_type), characters other than letters, digits and "_"
+// become "_", arrays and nulls are skipped, and a name that already exists gets "_extracted".
+// Collectors store nested objects as JSON text, so this covers slog groups and logged structs.
+// The source field is kept: it stays in the line as written and Grafana pretty-prints it in the
+// log details.
+type jsonRule struct{ from string } // empty: every field whose value is a JSON object
+
+func newJSONRule(r fieldRule) (rule, error) { return jsonRule{r.From}, nil }
+
+func (r jsonRule) apply(t *table, ctx *applyContext) {
+	var sources []string
+	if r.from != "" {
+		sources = []string{r.from}
+	} else {
+		for name := range t.cols {
+			if !strings.HasPrefix(name, "__") {
+				sources = append(sources, name)
+			}
+		}
+	}
+	existing := make(map[string]bool, len(t.cols))
+	for name := range t.cols {
+		existing[name] = true
+	}
+	for _, src := range sources {
+		col := t.cols[src]
+		if col == nil {
+			continue
+		}
+		prefix := sanitizeName(src)
+		for i, ok := range col.present {
+			v := col.values[i]
+			if !ok || len(v) < 2 || v[0] != '{' {
+				continue
+			}
+			var obj map[string]any
+			d := json.NewDecoder(bytes.NewReader([]byte(v)))
+			d.UseNumber()
+			if d.Decode(&obj) != nil {
+				continue
+			}
+			flattenJSON(t, ctx, existing, src, prefix, nil, obj, i)
+		}
+	}
+}
+
+func flattenJSON(t *table, ctx *applyContext, existing map[string]bool, src, prefix string, path []string, obj map[string]any, row int) {
+	for k, v := range obj {
+		name := prefix + "_" + sanitizeName(k)
+		keys := append(path[:len(path):len(path)], k)
+		var s string
+		switch x := v.(type) {
+		case map[string]any:
+			flattenJSON(t, ctx, existing, src, name, keys, x, row)
+			continue
+		case string:
+			s = x
+		case json.Number:
+			s = x.String()
+		case bool:
+			s = strconv.FormatBool(x)
+		default: // arrays and null
+			continue
+		}
+		if existing[name] {
+			name += "_extracted"
+		}
+		c := t.column(name)
+		c.values[row], c.present[row] = s, true
+		if ctx.flattened == nil {
+			ctx.flattened = map[string]jsonPath{}
+		}
+		if _, seen := ctx.flattened[name]; !seen {
+			ctx.flattened[name] = jsonPath{src, keys}
+		}
+	}
+}
+
+// sanitizeName replaces characters other than letters, digits and "_" with "_".
+func sanitizeName(s string) string {
+	b := []byte(s)
+	changed := false
+	for i, c := range b {
+		if !(c == '_' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9') {
+			b[i], changed = '_', true
+		}
+	}
+	if !changed {
+		return s
+	}
+	return string(b)
+}
+
+// describe maps the JSON keys known to the index (request.method) to their flattened names
+// (request_method), which stay filterable under the SLS name. Other flattened fields are found by
+// running the rules on sample logs (buildCatalog).
+func (r jsonRule) describe(c *catalogBuilder) {
+	for name, f := range c.fields {
+		base, sub, ok := strings.Cut(name, ".")
+		if !ok || f.SLSName == "" || (r.from != "" && base != r.from) || strings.HasPrefix(base, "__") {
+			continue
+		}
+		flat := sanitizeName(base) + "_" + sanitizeName(sub)
+		if _, own := c.fields[flat]; own {
+			continue
+		}
+		nf := *f
+		nf.Name, nf.Rule = flat, "json"
+		delete(c.fields, name)
+		c.fields[flat] = &nf
+	}
+	c.discover("json")
+}
 
 // ---------- columnar rows ----------
 

@@ -41,6 +41,8 @@ type logsConfig struct {
 		Fields []string `json:"fields"`
 		// Rest appends the other business fields (default true).
 		Rest *bool `json:"rest"`
+		// Exclude keeps fields out of the line; they stay in the log details.
+		Exclude []string `json:"exclude"`
 	} `json:"line"`
 }
 

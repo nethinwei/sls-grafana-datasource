@@ -64,6 +64,8 @@ export interface LogsConfig {
     fields?: string[];
     /** Append the other business fields to the line. Default true. */
     rest?: boolean;
+    /** Fields kept out of the line; they stay in the log details. */
+    exclude?: string[];
   };
 }
 
@@ -72,7 +74,7 @@ export interface SLSSecureJsonData {
   accessKeySecret?: string;
 }
 
-export type FieldRuleType = 'time' | 'rename' | 'extract' | 'drop' | 'default' | 'template';
+export type FieldRuleType = 'time' | 'rename' | 'extract' | 'drop' | 'default' | 'template' | 'json';
 
 /**
  * A rule reshaping log rows for display; rules run in order. Only `rename` maps back to SLS for
@@ -80,7 +82,7 @@ export type FieldRuleType = 'time' | 'rename' | 'extract' | 'drop' | 'default' |
  */
 export interface FieldRule {
   type: FieldRuleType;
-  /** Source field (time, rename, extract). */
+  /** Source field (time, rename, extract; json: empty means every field holding a JSON object). */
   from?: string;
   /** Target field (time, rename, extract, default, template). */
   to?: string;
@@ -108,6 +110,7 @@ export const DEFAULT_FIELD_RULES: FieldRule[] = [
   { type: 'time', from: '__time__', nanos: '__time_ns_part__', to: DEFAULT_TIME_FIELD },
   { type: 'drop', field: '__time__' },
   { type: 'drop', field: '__time_ns_part__' },
+  { type: 'json' },
 ];
 
 /** SLS meta fields added by LoongCollector / Logtail, renamed to OpenTelemetry semantic names. */
@@ -134,6 +137,8 @@ export interface CatalogField {
   slsName?: string;
   /** Rule type that produced or renamed the field. */
   rule?: FieldRuleType;
+  /** SPL expression reading a flattened JSON field (no slsName), for `| where` filters. */
+  expr?: string;
 }
 
 export interface Catalog {

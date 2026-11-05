@@ -65,14 +65,19 @@ describe('ConfigEditor logs', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Add OpenTelemetry renames' }));
     const rules = lastJson(onChange).logs?.rules ?? [];
-    expect(rules.slice(0, 3)).toEqual(DEFAULT_FIELD_RULES);
-    expect(rules.slice(3)).toEqual(OTEL_FIELD_RULES);
+    expect(rules.slice(0, DEFAULT_FIELD_RULES.length)).toEqual(DEFAULT_FIELD_RULES);
+    expect(rules.slice(DEFAULT_FIELD_RULES.length)).toEqual(OTEL_FIELD_RULES);
 
     const opts = options();
     opts.jsonData.logs = { rules };
     rerender(<ConfigEditor options={opts} onOptionsChange={onChange} />);
-    fireEvent.change(screen.getByLabelText('to 4'), { target: { value: 'node' } });
-    expect(lastJson(onChange).logs?.rules?.[3]).toEqual({ type: 'rename', from: '__tag__:__hostname__', to: 'node' });
+    const first = DEFAULT_FIELD_RULES.length; // the first OpenTelemetry rename
+    fireEvent.change(screen.getByLabelText(`to ${first + 1}`), { target: { value: 'node' } });
+    expect(lastJson(onChange).logs?.rules?.[first]).toEqual({
+      type: 'rename',
+      from: '__tag__:__hostname__',
+      to: 'node',
+    });
 
     fireEvent.click(screen.getByRole('button', { name: 'Reset to defaults' }));
     expect(lastJson(onChange).logs).toBeUndefined();
@@ -86,5 +91,19 @@ describe('ConfigEditor logs', () => {
 
     fireEvent.click(screen.getByLabelText('Other fields in line'));
     expect(lastJson(onChange).logs).toEqual({ line: { rest: false } });
+  });
+
+  it('orders the line fields', () => {
+    const onChange = jest.fn();
+    const opts = options();
+    opts.jsonData.logs = { line: { fields: ['host_name', 'msg'] } };
+    render(<ConfigEditor options={opts} onOptionsChange={onChange} />);
+    expect(screen.getByLabelText('Line field 1')).toHaveValue('host_name');
+
+    fireEvent.click(screen.getAllByRole('button', { name: 'Move down' })[0]);
+    expect(lastJson(onChange).logs).toEqual({ line: { fields: ['msg', 'host_name'] } });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add field' }));
+    expect(lastJson(onChange).logs?.line?.fields).toEqual(['host_name', 'msg', '']);
   });
 });

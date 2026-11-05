@@ -1,6 +1,9 @@
 package main
 
-import "errors"
+import (
+	"errors"
+	"strings"
+)
 
 var errDerivedField = errors.New("the field is produced by a field rule")
 
@@ -16,9 +19,10 @@ type logsView struct {
 	slsNames   map[string]string
 	shownNames map[string]string
 	// derived are fields produced by rules other than rename; SLS cannot filter on them.
-	derived    map[string]bool
-	lineFields []string
-	lineRest   bool
+	derived     map[string]bool
+	lineFields  []string
+	lineRest    bool
+	lineExclude map[string]bool
 }
 
 func compileLogsView(cfg logsConfig) logsView {
@@ -32,8 +36,12 @@ func compileLogsView(cfg logsConfig) logsView {
 	if cfg.Line.Rest != nil {
 		v.lineRest = *cfg.Line.Rest
 	}
+	v.lineExclude = map[string]bool{}
+	for _, f := range cfg.Line.Exclude {
+		v.lineExclude[f] = true
+	}
 	for _, f := range cfg.Line.Fields {
-		if f != "" {
+		if f != "" && !v.lineExclude[f] {
 			v.lineFields = append(v.lineFields, f)
 		}
 	}
@@ -60,13 +68,32 @@ func compileLogsView(cfg logsConfig) logsView {
 	return v
 }
 
-// table runs the rules on logs and returns the resulting columns, with the row times written by a
-// time rule targeting the time field.
-func (v *logsView) table(logs []map[string]string) (*table, rowTimes) {
+// table runs the rules on logs and returns the resulting columns and the run's context (row times
+// written by a time rule, fields flattened by a json rule).
+func (v *logsView) table(logs []map[string]string) (*table, *applyContext) {
 	t := newTable(logs)
-	ctx := applyContext{timeField: v.timeField}
+	ctx := &applyContext{timeField: v.timeField}
 	for _, r := range v.rules {
-		r.apply(t, &ctx)
+		r.apply(t, ctx)
 	}
-	return t, ctx.times
+	return t, ctx
+}
+
+// fieldExpr returns the SPL expression reading a flattened JSON field from its SLS field, e.g.
+// json_extract_scalar("request", '$["header"]["Content-Type"]'); "" for other fields.
+func (v *logsView) fieldExpr(name string, ctx *applyContext) string {
+	p, ok := ctx.flattened[name]
+	if !ok {
+		return ""
+	}
+	src := p.field
+	if sls, renamed := v.slsNames[src]; renamed {
+		src = sls
+	}
+	var path strings.Builder
+	path.WriteString("$")
+	for _, k := range p.keys {
+		path.WriteString(`["` + strings.ReplaceAll(strings.ReplaceAll(k, `\`, `\\`), `"`, `\"`) + `"]`)
+	}
+	return "json_extract_scalar(" + quoteIdentifier(src) + ", " + splString(path.String()) + ")"
 }

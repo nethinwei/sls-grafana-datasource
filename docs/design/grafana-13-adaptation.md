@@ -92,6 +92,7 @@ jsonData.logs ──compileLogsView──► logsView（每个数据源实例编
 
 扩展方式：
 
+- **字段如何被筛选**：规则产生的字段只存在于 Grafana。改名的字段换回 SLS 名；`json` 展开的字段带 SPL 表达式（`json_extract_scalar`）；其余规则产生的字段不能筛选。这些信息由字段目录（索引与样本）和查询结果帧（`meta.custom` 中的 `grafanaOnlyFields`、`fieldExprs`）提供，前后端都会记住结果帧里出现过的字段，样本没覆盖到的字段也能正确筛选。
 - **新增规则类型**：在 `ruleTypes` 中注册构造函数，实现 `apply` 与 `describe`；前端在 `FieldRuleType` 和 `RULE_SCHEMAS` 各加一项。日志行、补全、字段浏览和筛选随 `describe` 自动生效。
 - **新增字段角色**（像级别字段、时间字段这样有特殊含义的字段）：在 `logsConfig` 与 `logsView` 中加一项，在用到它的地方读取。
 - **字段目录增加属性**（例如字段的取值基数）：在 `catalogField` 中加字段，在 `buildCatalog` 中填充，前端直接使用。
