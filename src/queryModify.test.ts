@@ -1,10 +1,17 @@
+import fs from 'fs';
+import path from 'path';
+
 import {
   addStringFilter,
   hasFieldFilter,
   hasWhereFilter,
+  isSQL,
   splitStatement,
   toggleFieldFilter,
   toggleWhereFilter,
+  whereCondition,
+  addCondition,
+  fieldCondition,
 } from './queryModify';
 
 describe('splitStatement', () => {
@@ -69,12 +76,12 @@ describe('toggleWhereFilter', () => {
     ['*', 'msg', "it's", false, `* | where "msg" = 'it''s'`],
     [`* | where "a" = '1'`, 'a', '1', false, '*'],
   ])('%s  %s=%s negate=%s', (q, k, v, negate, want) => {
-    expect(toggleWhereFilter(q, k, v, negate)).toBe(want);
+    expect(toggleWhereFilter(q, `"${k}"`, v, negate)).toBe(want);
   });
 
   it('detects its own clauses', () => {
-    expect(hasWhereFilter(`* | where "a" = '1'`, 'a', '1')).toBe(true);
-    expect(hasWhereFilter(`* | where "a" != '1'`, 'a', '1')).toBe(false);
+    expect(hasWhereFilter(`* | where "a" = '1'`, '"a"', '1')).toBe(true);
+    expect(hasWhereFilter(`* | where "a" != '1'`, '"a"', '1')).toBe(false);
   });
 });
 
@@ -84,12 +91,43 @@ describe('review fixes', () => {
   });
 
   it('does not take a clause for a longer value as its own', () => {
-    const q = toggleWhereFilter('*', 'k', "a'b", false);
-    expect(hasWhereFilter(q, 'k', 'a')).toBe(false);
-    expect(toggleWhereFilter(q, 'k', 'a', false)).toBe(`* | where "k" = 'a''b' | where "k" = 'a'`);
+    const q = toggleWhereFilter('*', '"k"', "a'b", false);
+    expect(hasWhereFilter(q, '"k"', 'a')).toBe(false);
+    expect(toggleWhereFilter(q, '"k"', 'a', false)).toBe(`* | where "k" = 'a''b' | where "k" = 'a'`);
   });
 
   it('leaves SQL alone', () => {
-    expect(toggleWhereFilter('* | select count(*)', 'k', 'v', false)).toBe('* | select count(*)');
+    expect(toggleWhereFilter('* | select count(*)', '"k"', 'v', false)).toBe('* | select count(*)');
+  });
+});
+
+interface SyntaxCases {
+  splitStatement: Array<{ in: string; search: string; rest: string }>;
+  isSQL: Array<{ in: string; want: boolean }>;
+  addCondition: Array<{ query: string; condition: string; want: string }>;
+  searchEquals: Array<{ key: string; value: string; negate: boolean; want: string }>;
+  whereEquals: Array<{ expr: string; value: string; negate: boolean; want: string }>;
+}
+
+/** Cases shared with the backend tests (pkg/syntax_test.go), so both sides write the same syntax. */
+describe('shared filter syntax', () => {
+  const cases: SyntaxCases = JSON.parse(
+    fs.readFileSync(path.join(__dirname, '../testdata/filter-syntax.json'), 'utf8')
+  );
+
+  it.each(cases.splitStatement)('splitStatement %j', (c) => {
+    expect(splitStatement(c.in)).toEqual({ search: c.search, rest: c.rest });
+  });
+  it.each(cases.isSQL)('isSQL %j', (c) => {
+    expect(isSQL(c.in)).toBe(c.want);
+  });
+  it.each(cases.addCondition)('addCondition %j', (c) => {
+    expect(addCondition(c.query, c.condition)).toBe(c.want);
+  });
+  it.each(cases.searchEquals)('searchEquals %j', (c) => {
+    expect((c.negate ? 'not ' : '') + fieldCondition(c.key, c.value)).toBe(c.want);
+  });
+  it.each(cases.whereEquals)('whereEquals %j', (c) => {
+    expect(whereCondition(c.expr, c.value, c.negate)).toBe(c.want);
   });
 });

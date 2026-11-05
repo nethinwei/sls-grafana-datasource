@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	sls "github.com/aliyun/aliyun-log-go-sdk"
+	"github.com/grafana/grafana-plugin-sdk-go/data"
 )
 
 var otelTestRules = append(append([]fieldRule{}, defaultFieldRules...),
@@ -221,6 +222,20 @@ func TestRangeOnTextUsesWhere(t *testing.T) {
 	cat := &catalog{Fields: []catalogField{{Name: "status", Type: "text", Indexed: &yes, SLSName: "status"}, {Name: "cost", Type: "long", Indexed: &yes, SLSName: "cost"}}}
 	q, _ := applyAdhocFilters("*", []adhocFilter{{Key: "status", Operator: ">", Value: "499"}, {Key: "cost", Operator: ">", Value: "10"}}, testView(nil, nil, true), cat, nil)
 	if q != `cost > 10 | where cast("status" as double) > 499` {
+		t.Errorf("q = %q", q)
+	}
+}
+
+func TestFlattenedNameThatIsAlsoARealField(t *testing.T) {
+	yes := true
+	cat := &catalog{Fields: []catalogField{{Name: "order_id", Type: "text", Indexed: &yes, SLSName: "order_id"}}}
+	ds := &datasource{}
+	f := data.NewFrame("logs")
+	expr := `coalesce("order_id", json_extract_scalar("order", '$["id"]'))`
+	f.Meta = &data.FrameMeta{Custom: map[string]any{fieldExprsKey: map[string]string{"order_id": expr}}}
+	ds.learnFields("ls", f)
+	q, _ := applyAdhocFilters("*", []adhocFilter{{Key: "order_id", Operator: "=", Value: "TP1"}}, testView(nil, nil, true), cat, ds.learnedFields("ls"))
+	if q != "* | where "+expr+" = 'TP1'" {
 		t.Errorf("q = %q", q)
 	}
 }

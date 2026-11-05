@@ -163,3 +163,16 @@ export interface Catalog {
   indexKnown: boolean;
   message?: string;
 }
+
+/**
+ * How SLS filters a field of a result, as the backend decides for dashboard filters (frame meta
+ * `filterFields`, see describeFilters in pkg/datasource.go). null: the field exists only in Grafana.
+ */
+export interface FilterDescriptor {
+  /** SLS field for search conditions. */
+  key?: string;
+  /** SPL expression for where clauses. */
+  expr: string;
+  /** Write a search condition (the field is indexed); otherwise a where clause. */
+  search: boolean;
+}

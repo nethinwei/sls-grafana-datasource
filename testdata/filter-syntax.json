@@ -1,0 +1,42 @@
+{
+  "_comment": "Filter syntax shared by the backend (pkg/filters.go) and the frontend (src/queryModify.ts). Both test suites run every case, so the two implementations cannot drift apart.",
+  "splitStatement": [
+    { "in": "level: ERROR", "search": "level: ERROR", "rest": "" },
+    { "in": "  * | select count(*)", "search": "*", "rest": "| select count(*)" },
+    { "in": "msg: \"a | b\" | where x > 1", "search": "msg: \"a | b\"", "rest": "| where x > 1" },
+    { "in": "msg: it's | select 1", "search": "msg: it's", "rest": "| select 1" },
+    { "in": "msg: \"say \\\"|\\\"\" and a: b", "search": "msg: \"say \\\"|\\\"\" and a: b", "rest": "" }
+  ],
+  "isSQL": [
+    { "in": "* | select count(*)", "want": true },
+    { "in": "* | SELECT a", "want": true },
+    { "in": "* | set session mode=scan; select count(*)", "want": true },
+    { "in": "* | where a > 1", "want": false },
+    { "in": "msg: \"a | select b\"", "want": false },
+    { "in": "msg: it's | select count(*) as c", "want": true },
+    { "in": "level: ERROR", "want": false }
+  ],
+  "addCondition": [
+    { "query": "*", "condition": "a: \"1\"", "want": "a: \"1\"" },
+    { "query": "", "condition": "a: \"1\"", "want": "a: \"1\"" },
+    { "query": "level: ERROR", "condition": "a: \"1\"", "want": "level: ERROR and a: \"1\"" },
+    { "query": "level: ERROR or level: WARN", "condition": "a: \"1\"", "want": "(level: ERROR or level: WARN) and a: \"1\"" },
+    { "query": "(a: 1 or b: 2) and c: 3", "condition": "d: \"4\"", "want": "(a: 1 or b: 2) and c: 3 and d: \"4\"" },
+    { "query": "msg: \"x or y\"", "condition": "d: \"4\"", "want": "msg: \"x or y\" and d: \"4\"" },
+    { "query": "* | select count(*)", "condition": "a: \"1\"", "want": "a: \"1\" | select count(*)" }
+  ],
+  "searchEquals": [
+    { "key": "level", "value": "ERROR", "negate": false, "want": "level: \"ERROR\"" },
+    { "key": "level", "value": "ERROR", "negate": true, "want": "not level: \"ERROR\"" },
+    { "key": "__tag__:__hostname__", "value": "web-1", "negate": false, "want": "__tag__:__hostname__: \"web-1\"" },
+    { "key": "request.method", "value": "POST", "negate": false, "want": "request.method: \"POST\"" },
+    { "key": "user agent", "value": "x", "negate": false, "want": "\"user agent\": \"x\"" },
+    { "key": "msg", "value": "say \"hi\" \\ bye", "negate": false, "want": "msg: \"say \\\"hi\\\" \\\\ bye\"" }
+  ],
+  "whereEquals": [
+    { "expr": "\"http_status\"", "value": "200", "negate": false, "want": "\"http_status\" = '200'" },
+    { "expr": "\"http_status\"", "value": "200", "negate": true, "want": "coalesce(\"http_status\", '') != '200'" },
+    { "expr": "\"msg\"", "value": "it's", "negate": false, "want": "\"msg\" = 'it''s'" },
+    { "expr": "coalesce(\"http_method\", json_extract_scalar(\"http\", '$[\"method\"]'))", "value": "POST", "negate": false, "want": "coalesce(\"http_method\", json_extract_scalar(\"http\", '$[\"method\"]')) = 'POST'" }
+  ]
+}

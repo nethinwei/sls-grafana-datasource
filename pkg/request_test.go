@@ -30,7 +30,8 @@ func fakeSLS(t *testing.T, handle func(n int32, w http.ResponseWriter)) (*dataso
 	}
 	project = project.WithRequestTimeout(5 * time.Second)
 	view := compileLogsView(logsConfig{})
-	return &datasource{cfg: &settings{Project: "p", LogStore: "ls", view: view, sqlLocation: time.UTC}, project: project}, &n
+	client := sls.CreateNormalInterfaceV2(srv.URL, sls.NewStaticCredentialsProvider("id", "secret", ""))
+	return &datasource{cfg: &settings{LogStore: "ls", view: view, sqlLocation: time.UTC}, project: project, client: client}, &n
 }
 
 func writeLogs(w http.ResponseWriter, progress string, rows ...map[string]string) {
@@ -121,7 +122,8 @@ func TestIncompleteResultsAreRetried(t *testing.T) {
 	if res.Error != nil {
 		t.Fatal(res.Error)
 	}
-	if n.Load() != 3 || len(res.Frames[0].Meta.Notices) != 0 {
+	// 3 GetLogs until complete, then the field catalog (index and sample) for the filter descriptors.
+	if n.Load() < 3 || len(res.Frames[0].Meta.Notices) != 0 {
 		t.Fatalf("err=%v requests=%d notices=%v", res.Error, n.Load(), res.Frames[0].Meta.Notices)
 	}
 }
@@ -201,7 +203,38 @@ func TestLogsArePagedInParallel(t *testing.T) {
 			t.Fatalf("row %d = %v: pages out of order", i, col.At(i))
 		}
 	}
-	if n.Load() > 5 { // 1 + one batch of 4
+	if n.Load() > 7 { // 1 + one batch of 4, + 2 for the field catalog
 		t.Errorf("requests = %d", n.Load())
+	}
+}
+
+func TestFramesDescribeFilters(t *testing.T) {
+	ds, _ := fakeSLS(t, func(_ int32, w http.ResponseWriter) {
+		writeLogs(w, "Complete", map[string]string{"__time__": "1700000000", "msg": "a", "__tag__:__hostname__": "web-1",
+			"http": `{"method":"POST"}`})
+	})
+	ds.cfg.view = *testView(append(append([]fieldRule{}, defaultFieldRules...),
+		fieldRule{Type: "rename", From: "__tag__:__hostname__", To: "host_name"}, fieldRule{Type: "json"},
+		fieldRule{Type: "extract", From: "msg", To: "word", Pattern: `(\w+)`}), nil, true)
+	q := backend.DataQuery{RefID: "A", JSON: []byte(`{"query":"*"}`), TimeRange: backend.TimeRange{From: time.Unix(1700000000, 0), To: time.Unix(1700000060, 0)}}
+	res := ds.runQuery(context.Background(), q, false)
+	if res.Error != nil {
+		t.Fatal(res.Error)
+	}
+	custom := res.Frames[0].Meta.Custom.(map[string]any)
+	fields := custom[filterFieldsKey].(map[string]*filterDescriptor)
+	if custom[logstoreKey] != "ls" {
+		t.Errorf("logstore = %v", custom[logstoreKey])
+	}
+	if d := fields["host_name"]; d == nil || d.Key != "__tag__:__hostname__" || !d.Search {
+		t.Errorf("host_name = %+v", d)
+	}
+	if d := fields["http_method"]; d == nil || d.Search || d.Expr != `coalesce("http_method", json_extract_scalar("http", '$["method"]'))` {
+		t.Errorf("http_method = %+v", d)
+	}
+	for _, name := range []string{"word", "message", "id", "time"} {
+		if d, ok := fields[name]; !ok || d != nil {
+			t.Errorf("%s = %+v, want described as not filterable", name, d)
+		}
 	}
 }

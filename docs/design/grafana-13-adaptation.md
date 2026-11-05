@@ -87,12 +87,12 @@ jsonData.logs ──compileLogsView──► logsView（每个数据源实例编
 | 规则注册表 | `pkg/rules.go` 的 `ruleTypes` | 每种规则一个构造函数，返回实现 `apply`（改数据）与 `describe`（告诉字段目录它删了、改名了或产生了哪个字段）的对象 |
 | 日志视图 | `pkg/view.go` | 规则、级别字段、时间字段、日志行配置；由 `describe` 推出改名映射、规则产生的字段 |
 | 字段目录 | `pkg/catalog.go` | 字段名、类型、能否检索、能否用于 SQL、SLS 名、来源规则 |
-| 筛选翻译 | `pkg/filters.go` | 改名换回 SLS 名；有索引用检索，没有索引用 SPL `\| where`；SQL 语句中无法表达的筛选给出提示 |
+| 筛选翻译 | `pkg/filters.go`、`describeFilters`（`pkg/datasource.go`） | 改名换回 SLS 名；有索引用检索，没有索引用 SPL `\| where`；SQL 语句中无法表达的筛选给出提示；结果帧下发每个字段的筛选描述 |
 | 前端 | `src/datasource.ts`、`src/language/*`、`src/components/FieldRulesEditor.tsx` | 只读字段目录；规则编辑器由 `RULE_SCHEMAS` 描述 |
 
 扩展方式：
 
-- **字段如何被筛选**：规则产生的字段只存在于 Grafana。改名的字段换回 SLS 名；`json` 展开的字段带 SPL 表达式（`json_extract_scalar`）；其余规则产生的字段不能筛选。这些信息由字段目录（索引与样本）和查询结果帧（`meta.custom` 中的 `grafanaOnlyFields`、`fieldExprs`）提供，前后端都会记住结果帧里出现过的字段，样本没覆盖到的字段也能正确筛选。
+- **字段如何被筛选**：只由后端决定（`filterTarget`）。改名的字段换回 SLS 名；有索引的字段用检索，没有索引的用 SPL `| where`；`json` 展开的字段用 `coalesce("名", json_extract_scalar(...))`，同时匹配采集端已展开的存储；其余规则产生的字段不能筛选。看板筛选在后端直接翻译；Explore 的 ➕/➖ 必须在前端同步改写查询，所以每个日志结果帧在 `meta.custom.filterFields` 里带上每个字段的筛选描述（SLS 名、SPL 表达式、是否用检索），前端只查表、不推导。两边都要把条件写成 SLS 语法（语句切分、`and` 拼接、检索与 where 条件的转义），这部分由 `testdata/filter-syntax.json` 的共享用例约束，Go 与 Jest 测试都跑这组用例，保证逐字一致。
 - **新增规则类型**：在 `ruleTypes` 中注册构造函数，实现 `apply` 与 `describe`；前端在 `FieldRuleType` 和 `RULE_SCHEMAS` 各加一项。日志行、补全、字段浏览和筛选随 `describe` 自动生效。
 - **新增字段角色**（像级别字段、时间字段这样有特殊含义的字段）：在 `logsConfig` 与 `logsView` 中加一项，在用到它的地方读取。
 - **字段目录增加属性**（例如字段的取值基数）：在 `catalogField` 中加字段，在 `buildCatalog` 中填充，前端直接使用。

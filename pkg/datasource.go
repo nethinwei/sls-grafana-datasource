@@ -181,6 +181,50 @@ func (ds *datasource) runQuery(ctx context.Context, q backend.DataQuery, fromAle
 	return backend.DataResponse{Frames: data.Frames{frame}}
 }
 
+// filterDescriptor tells the frontend how SLS filters a field of a result, exactly as dashboard
+// filters are translated (filterTarget), so Explore's ➕ / ➖ write the same conditions without
+// repeating the rules. A nil descriptor: the field exists only in Grafana and cannot be filtered.
+type filterDescriptor struct {
+	Key    string `json:"key,omitempty"` // SLS field for search conditions
+	Expr   string `json:"expr"`          // SPL expression for where clauses
+	Search bool   `json:"search"`        // write a search condition (the field is indexed)
+}
+
+// Frame meta keys read by the frontend.
+const (
+	filterFieldsKey = "filterFields"
+	logstoreKey     = "logstore"
+)
+
+// describeFilters learns what the rules produced in a logs frame, then replaces that internal meta
+// with a filter descriptor per field.
+func (ds *datasource) describeFilters(ctx context.Context, logstore string, frame *data.Frame) {
+	ds.learnFields(logstore, frame)
+	cat, err := ds.catalog(ctx, logstore)
+	if err != nil {
+		log.DefaultLogger.Debug("field catalog unavailable, describing filters without it", "error", err)
+	}
+	learned := ds.learnedFields(logstore)
+	out := make(map[string]*filterDescriptor, len(frame.Fields))
+	for _, f := range frame.Fields {
+		switch f.Name {
+		case "time", "message", "id": // added by the plugin
+			out[f.Name] = nil
+			continue
+		}
+		t, ok := filterTarget(f.Name, &ds.cfg.view, cat, learned)
+		if !ok {
+			out[f.Name] = nil
+			continue
+		}
+		out[f.Name] = &filterDescriptor{Key: t.name, Expr: t.expr, Search: t.indexed && t.name != ""}
+	}
+	if frame.Meta == nil {
+		frame.Meta = &data.FrameMeta{}
+	}
+	frame.Meta.Custom = map[string]any{filterFieldsKey: out, logstoreKey: logstore}
+}
+
 // maxLearnedFields bounds the fields remembered per logstore; past it the memory starts over.
 const maxLearnedFields = 5000
 
@@ -290,7 +334,7 @@ func (ds *datasource) execute(ctx context.Context, logstore, query string, m *qu
 			}
 		}
 		frame = buildLogsFrame(logs, keys, &ds.cfg.view)
-		ds.learnFields(logstore, frame)
+		ds.describeFilters(ctx, logstore, frame)
 	}
 
 	if fromAlert {

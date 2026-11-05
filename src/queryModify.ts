@@ -35,9 +35,14 @@ function quoteValue(value: string): string {
   return '"' + value.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
 }
 
+/** A field name for SLS search, quoted when it has characters other than [\w.@:-] (spaces, ...). */
+function searchKey(key: string): string {
+  return /^[\w.@:-]+$/.test(key) ? key : quoteValue(key);
+}
+
 /** `key: "value"` */
 export function fieldCondition(key: string, value: string): string {
-  return `${key}: ${quoteValue(value)}`;
+  return `${searchKey(key)}: ${quoteValue(value)}`;
 }
 
 function isMatchAll(search: string): boolean {
@@ -139,17 +144,21 @@ function splString(value: string): string {
 }
 
 /**
- * `expr` replaces the quoted field, e.g. json_extract_scalar("http", '$["method"]'). A missing
- * field is null in SPL; ➖ compares it as "" so that, as in Loki, logs without the field remain.
+ * Where condition on an SPL expression: a quoted field ("http_status") or, for flattened JSON
+ * fields, json_extract_scalar(...). A missing field is null in SPL; ➖ compares it as "" so that,
+ * as in Loki, logs without the field remain.
  */
-function whereClause(key: string, value: string, negate: boolean, expr?: string): string {
-  const col = expr ?? `"${key.replace(/"/g, '""')}"`;
-  return negate ? `| where coalesce(${col}, '') != ${splString(value)}` : `| where ${col} = ${splString(value)}`;
+export function whereCondition(expr: string, value: string, negate: boolean): string {
+  return negate ? `coalesce(${expr}, '') != ${splString(value)}` : `${expr} = ${splString(value)}`;
 }
 
-/** Whether the statement has `| where "key" = 'value'` added by toggleWhereFilter. */
-export function hasWhereFilter(query: string, key: string, value: string, expr?: string): boolean {
-  return indexOfClause(query, whereClause(key, value, false, expr)) >= 0;
+function whereClause(expr: string, value: string, negate: boolean): string {
+  return '| where ' + whereCondition(expr, value, negate);
+}
+
+/** Whether the statement has `| where <expr> = 'value'` added by toggleWhereFilter. */
+export function hasWhereFilter(query: string, expr: string, value: string): boolean {
+  return indexOfClause(query, whereClause(expr, value, false)) >= 0;
 }
 
 /** Position of a where clause, not counting a clause for a longer value ('a' inside 'a''b'). */
@@ -168,13 +177,13 @@ export function isSQL(query: string): boolean {
 }
 
 /**
- * ➕ / ➖ on a field that has no index: SLS search cannot use it, but SPL can filter any field.
- * Appends `| where "key" = 'value'` (or `!=`); clicking the same one again removes it, and the
+ * ➕ / ➖ on a field that SLS search cannot use (no index, flattened JSON): SPL can filter it.
+ * Appends `| where <expr> = 'value'` (or `!=`); clicking the same one again removes it, and the
  * opposite clause on the same value is replaced.
  */
-export function toggleWhereFilter(query: string, key: string, value: string, negate: boolean, expr?: string): string {
-  const wanted = whereClause(key, value, negate, expr);
-  const opposite = whereClause(key, value, !negate, expr);
+export function toggleWhereFilter(query: string, expr: string, value: string, negate: boolean): string {
+  const wanted = whereClause(expr, value, negate);
+  const opposite = whereClause(expr, value, !negate);
   if (isSQL(query)) {
     return query; // SPL cannot follow SQL
   }

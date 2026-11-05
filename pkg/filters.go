@@ -79,14 +79,23 @@ type filterField struct {
 type learnedFields func(name string) (expr string, known bool)
 
 // filterTarget returns how SLS reaches a field shown in Grafana; ok is false for fields that exist
-// only in Grafana. The catalog comes first (index and sample); then what recent results produced
-// (flattened JSON keys outside the sample); then the rules' renames, with fields assumed indexed.
+// only in Grafana. Flattened JSON fields seen in results come first (their expression reads both
+// storages); then the catalog (index and sample); then what results said about fields the rules
+// produced; then the rules' renames, with fields assumed indexed.
 func filterTarget(key string, view *logsView, cat *catalog, learned learnedFields) (filterField, bool) {
 	if key == "detected_level" { // Grafana's name for the level of a log row
 		key = view.levelField
 	}
 	field := func(name string, indexed bool) (filterField, bool) {
 		return filterField{name: name, expr: quoteIdentifier(name), indexed: indexed}, true
+	}
+	// A field that results produced by flattening JSON may also be a real field of other logs of the
+	// logstore (order_id at the top level in some services, inside order in others): its
+	// expression, coalesce("order_id", json_extract_scalar("order", ...)), matches both.
+	if learned != nil {
+		if expr, known := learned(key); known && expr != "" {
+			return filterField{expr: expr}, true
+		}
 	}
 	if cat != nil {
 		if cf, found := cat.byName(key); found {

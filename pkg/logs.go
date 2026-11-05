@@ -58,6 +58,7 @@ func (ds *datasource) logsContext(ctx context.Context, logstore string, p *conte
 	}
 	frame := buildLogsFrame(logs, keys, &ds.cfg.view)
 	keepOrder(frame, p.Direction == "forward")
+	ds.describeFilters(ctx, logstore, frame)
 	frame.Meta.ExecutedQueryString = fmt.Sprintf("logstore: %s\nGetContextLogs pack_id=%s pack_meta=%s back_lines=%d forward_lines=%d",
 		logstore, p.PackID, p.PackMeta, back, forward)
 	return data.Frames{frame}, nil

@@ -33,23 +33,12 @@ import { addStringFilter, hasFieldFilter, hasWhereFilter, toggleFieldFilter, tog
 import { interpolateLogstore, interpolateQuery } from './templating';
 import {
   type Catalog,
-  type CatalogField,
+  type FilterDescriptor,
   QUERY_TYPE_LOGS_CONTEXT,
   QUERY_TYPE_LOGS_VOLUME,
   type SLSDataSourceOptions,
   type SLSQuery,
 } from './types';
-
-/** Fields the plugin adds to log rows; filtering on them makes no sense in SLS. */
-const SYNTHETIC_FIELDS = new Set([
-  'message',
-  'id',
-  'time',
-  '__time__',
-  '__time_ns_part__',
-  '__pack_meta__',
-  '__index_number__',
-]);
 
 const CONTEXT_WINDOW_MS = 24 * 3600 * 1000; // GetContextLogs reads at most one day around the log
 const MAX_LEARNED_FIELDS = 5000;
@@ -84,10 +73,10 @@ export class SLSDataSource
   /** Field catalogs per logstore ('' = default), see getCatalog. */
   private readonly catalogs = new Map<string, CatalogEntry>();
   /**
-   * What query results said about fields the rules produced (see buildLogsFrame in the backend):
-   * name → SPL expression for flattened JSON fields, '' for fields that exist only in Grafana.
+   * How to filter the fields of recent results, per logstore and field, as the backend described
+   * them (frame meta filterFields); null for fields that exist only in Grafana.
    */
-  private readonly learnedFields = new Map<string, string>();
+  private readonly filterFields = new Map<string, FilterDescriptor | null>();
 
   constructor(
     settings: DataSourceInstanceSettings<SLSDataSourceOptions>,
@@ -138,11 +127,6 @@ export class SLSDataSource
     }
   }
 
-  /** A field of an already loaded catalog; undefined when not loaded or unknown. */
-  private catalogField(name: string, logstore?: string): CatalogField | undefined {
-    return this.catalogs.get(this.resolveLogstore(logstore))?.value?.fields.find((f) => f.name === name);
-  }
-
   private resolveLogstore(logstore?: string): string {
     const resolved = interpolateLogstore(logstore, {}, this.templateSrv) ?? '';
     return resolved === this.defaultLogstore ? '' : resolved;
@@ -154,12 +138,15 @@ export class SLSDataSource
 
   private learnFields(frame: DataFrame) {
     const custom = frame.meta?.custom as
-      { grafanaOnlyFields?: string[]; fieldExprs?: Record<string, string> } | undefined;
-    if (this.learnedFields.size > MAX_LEARNED_FIELDS) {
-      this.learnedFields.clear(); // past the bound the memory starts over, as in the backend
+      { logstore?: string; filterFields?: Record<string, FilterDescriptor | null> } | undefined;
+    if (!custom?.filterFields) {
+      return;
     }
-    custom?.grafanaOnlyFields?.forEach((name) => this.learnedFields.set(name, ''));
-    Object.entries(custom?.fieldExprs ?? {}).forEach(([name, expr]) => this.learnedFields.set(name, expr));
+    if (this.filterFields.size > MAX_LEARNED_FIELDS) {
+      this.filterFields.clear(); // past the bound the memory starts over, as in the backend
+    }
+    const logstore = this.resolveLogstore(custom.logstore);
+    Object.entries(custom.filterFields).forEach(([name, d]) => this.filterFields.set(`${logstore}\u0000${name}`, d));
   }
 
   /** Explore starts with a log search; panels and alert rules with an event count over time. */
@@ -197,35 +184,20 @@ export class SLSDataSource
   // ---------- Explore: ➕ / ➖ on log fields ----------
 
   /**
-   * SLS field behind a field shown in Grafana: detected_level is the level field, renamed fields
-   * (host_name) go back to their SLS name (__tag__:__hostname__). Fields added by the plugin or
-   * produced by rules exist only in Grafana and cannot be filtered.
+   * How SLS filters a field shown in Grafana: the backend's description from the result
+   * (filterFields). Before any result described it, the field is tried as an indexed SLS field;
+   * detected_level stands for the level field.
    */
-  private filterTarget(
-    key: string,
-    logstore?: string,
-    frame?: DataFrame
-  ): { key: string; indexed: boolean; expr?: string } | undefined {
-    const name = key === 'detected_level' ? this.levelField : key;
-    if (SYNTHETIC_FIELDS.has(name)) {
-      return undefined;
-    }
-    const field = this.catalogField(name, logstore);
-    if (field) {
-      if (field.slsName) {
-        return { key: field.slsName, indexed: field.indexed !== false };
-      }
-      return field.expr ? { key: name, indexed: false, expr: field.expr } : undefined;
-    }
-    // Fields the rules produced in this or earlier results (see buildLogsFrame in the backend).
+  private filterTarget(key: string, logstore?: string, frame?: DataFrame): FilterDescriptor | undefined {
     if (frame) {
       this.learnFields(frame);
     }
-    const learned = this.learnedFields.get(name);
-    if (learned !== undefined) {
-      return learned ? { key: name, indexed: false, expr: learned } : undefined;
+    const known = this.filterFields.get(`${this.resolveLogstore(logstore)}\u0000${key}`);
+    if (known !== undefined) {
+      return known ?? undefined;
     }
-    return { key: name, indexed: true }; // catalog not loaded yet or field not seen: try as is
+    const name = key === 'detected_level' ? this.levelField : key;
+    return { key: name, expr: `"${name.replace(/"/g, '""')}"`, search: true };
   }
 
   /**
@@ -242,9 +214,10 @@ export class SLSDataSource
     const text = query.query ?? '*';
     return {
       ...query,
-      query: target.indexed
-        ? toggleFieldFilter(text, target.key, filter.options.value, negate)
-        : toggleWhereFilter(text, target.key, filter.options.value, negate, target.expr),
+      query:
+        target.search && target.key
+          ? toggleFieldFilter(text, target.key, filter.options.value, negate)
+          : toggleWhereFilter(text, target.expr, filter.options.value, negate),
     };
   }
 
@@ -255,7 +228,8 @@ export class SLSDataSource
     }
     const text = query.query ?? '';
     return (
-      hasFieldFilter(text, target.key, filter.value) || hasWhereFilter(text, target.key, filter.value, target.expr)
+      (target.key !== undefined && hasFieldFilter(text, target.key, filter.value)) ||
+      hasWhereFilter(text, target.expr, filter.value)
     );
   }
 
