@@ -35,6 +35,8 @@ type queryModel struct {
 	// stored PromQL types ("range", "instant") here, which are treated as normal queries.
 	QueryType string         `json:"queryType"`
 	Context   *contextParams `json:"context"`
+	// AdhocFilters are the dashboard's ad hoc filters, translated with the field catalog (filters.go).
+	AdhocFilters []adhocFilter `json:"adhocFilters"`
 
 	LegacyXcol        string `json:"xcol"`
 	LegacyLogsPerPage int64  `json:"logsPerPage"`

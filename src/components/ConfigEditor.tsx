@@ -1,8 +1,9 @@
 import type { DataSourcePluginOptionsEditorProps } from '@grafana/data';
-import { Field, Input, SecretInput, Stack, Switch, Text, TextLink } from '@grafana/ui';
+import { Field, Input, SecretInput, Stack, Switch, TagsInput, Text, TextLink } from '@grafana/ui';
 import React from 'react';
 
-import type { SLSDataSourceOptions, SLSSecureJsonData } from '../types';
+import { DEFAULT_TIME_FIELD, type LogsConfig, type SLSDataSourceOptions, type SLSSecureJsonData } from '../types';
+import { FieldRulesEditor } from './FieldRulesEditor';
 
 type Props = DataSourcePluginOptionsEditorProps<SLSDataSourceOptions, SLSSecureJsonData>;
 
@@ -12,6 +13,17 @@ export function ConfigEditor({ options, onOptionsChange }: Props) {
 
   const setJson = (patch: Partial<SLSDataSourceOptions>) =>
     onOptionsChange({ ...options, jsonData: { ...jsonData, ...patch } });
+  const logs = jsonData.logs ?? {};
+  /** Sets logs settings; undefined values are removed so the defaults apply. */
+  const setLogs = (patch: Partial<LogsConfig>) => {
+    const next: LogsConfig = { ...logs, ...patch };
+    (Object.keys(next) as Array<keyof LogsConfig>).forEach((k) => next[k] === undefined && delete next[k]);
+    setJson({ logs: Object.keys(next).length ? next : undefined });
+  };
+  const setLine = (patch: NonNullable<LogsConfig['line']>) => {
+    const line = { ...logs.line, ...patch };
+    setLogs({ line: line.fields?.length || line.rest === false ? line : undefined });
+  };
   const setSecret = (key: keyof SLSSecureJsonData, value: string) =>
     onOptionsChange({ ...options, secureJsonData: { ...secure, [key]: value } });
   const resetSecret = (key: keyof SLSSecureJsonData) =>
@@ -104,22 +116,59 @@ export function ConfigEditor({ options, onOptionsChange }: Props) {
           onChange={(e) => setJson({ sqlTimeZone: e.currentTarget.value.trim() || undefined })}
         />
       </Field>
-      <Field
-        label="Level field"
-        description="Field holding the log level, used for level colours and the logs volume. Enable SQL statistics on it to split the volume by level."
-      >
-        <Input
-          width={30}
-          placeholder="level"
-          value={jsonData.levelField ?? ''}
-          onChange={(e) => setJson({ levelField: e.currentTarget.value.trim() || undefined })}
-        />
-      </Field>
       <Field label="International site" description="Open the console on alibabacloud.com instead of aliyun.com.">
         <Switch
           value={Boolean(jsonData.international)}
           onChange={(e) => setJson({ international: e.currentTarget.checked })}
         />
+      </Field>
+
+      <Text element="h3">Logs</Text>
+      <Field
+        label="Level field"
+        description="Field holding the log level (after the rules), used for level colours and the logs volume. Enable SQL statistics on it to split the volume by level."
+      >
+        <Input
+          width={30}
+          placeholder="level"
+          value={logs.levelField ?? ''}
+          onChange={(e) => setLogs({ levelField: e.currentTarget.value.trim() || undefined })}
+        />
+      </Field>
+      <Field
+        label="Time field"
+        description="Field that becomes the row timestamp, written by a time rule (see the default rules)."
+      >
+        <Input
+          width={30}
+          placeholder={DEFAULT_TIME_FIELD}
+          value={logs.timeField ?? ''}
+          onChange={(e) => setLogs({ timeField: e.currentTarget.value.trim() || undefined })}
+        />
+      </Field>
+      <Field
+        label="Line fields"
+        description="Fields opening the log line, in this order, e.g. host.name and host.ip to see where a log comes from. Fields produced by rules appear in the line only when listed here."
+      >
+        <TagsInput
+          width={60}
+          placeholder="field name, Enter to add"
+          tags={logs.line?.fields ?? []}
+          onChange={(fields) => setLine({ fields: fields.length ? fields : undefined })}
+        />
+      </Field>
+      <Field
+        label="Other fields in line"
+        description="Append the other business fields (not SLS meta fields) after the line fields."
+      >
+        <Switch
+          aria-label="Other fields in line"
+          value={logs.line?.rest !== false}
+          onChange={(e) => setLine({ rest: e.currentTarget.checked ? undefined : false })}
+        />
+      </Field>
+      <Field label="Field rules">
+        <FieldRulesEditor value={logs.rules} onChange={(rules) => setLogs({ rules })} />
       </Field>
     </Stack>
   );

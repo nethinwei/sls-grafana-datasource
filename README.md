@@ -25,9 +25,9 @@
 | Region | 地域 ID，例如 `cn-hangzhou`。填写后使用 V4 签名 |
 | AccessKey | 建议使用只授权了目标 logstore 的 RAM 用户 |
 | SQL time zone | SQL 返回的日期时间字符串（`timestamp` 列、`from_unixtime`、`date_format`）的时区，SLS 默认 UTC+8，所以默认 `Asia/Shanghai` |
-| Level field | 日志级别所在的字段，默认 `level` |
+| Logs | 日志的处理与展示：级别字段、时间字段、日志行字段、字段规则，见下文「日志处理」 |
 
-最小权限：查询只需要 `log:GetLogStoreLogs`。以下权限可选：`log:GetLogStore`（健康检查）、`log:ListLogStores`（logstore 下拉列表）、`log:GetIndex`（字段列表与补全，没有时从样本日志中归纳）、`log:GetLogStoreContextLogs`（日志上下文）、`log:GetLogStoreHistogram`（级别字段未开启统计时的日志量）。
+最小权限：查询只需要 `log:GetLogStoreLogs`。以下权限可选：`log:GetLogStore`（健康检查）、`log:ListLogStores`（logstore 下拉列表）、`log:GetIndex`（字段目录：补全、字段提示、字段浏览与筛选，没有时从样本日志中归纳）、`log:GetLogStoreContextLogs`（日志上下文）、`log:GetLogStoreHistogram`（级别字段未开启统计时的日志量）。
 
 ## 查询
 
@@ -79,12 +79,56 @@
 |---|---|
 | 日志量直方图 | Explore 中按级别统计整个时间范围的日志量（由 SLS 计算，不只是已返回的行）。级别字段开启了 SQL 统计时按级别拆分，否则只显示总量。只对检索语句生效 |
 | 点字段筛选 | Explore 的日志详情中点 ➕ / ➖，在检索语句中加入 `key: "value"` / `not key: "value"`；再点一次移除 |
-| 看板筛选 | 看板日志面板中点 ➕ / ➖ 会生成看板的 Filters 变量，作用于该数据源的所有查询（包括 SQL 面板）。字段列表来自 logstore 索引，取值按出现次数排序；`=~` / `!~` 中的简单正则会转换为 SLS 通配符 |
+| 看板筛选 | 看板日志面板中点 ➕ / ➖ 会生成看板的 Filters 变量，作用于该数据源的所有查询（包括 SQL 面板）。筛选由后端按字段目录翻译：改过名的字段用 SLS 原名，有索引的字段用检索条件，没有索引的字段用 SPL `\| where`，`=~` / `!~` 中的简单正则转为通配符，其余用 `regexp_like`。无法翻译的筛选会在面板上提示 |
 | 日志上下文 | 日志行菜单中的「Show context」：由 SLS 从同一来源读取前后的日志（GetContextLogs），不受当前查询条件限制 |
-| 级别 | 数据源配置中的「Level field」（默认 `level`）用于级别着色和日志量 |
-| 字段补全 | 查询编辑器按所选 logstore 的索引补全字段名 |
+| 级别 | 「Logs → Level field」（默认 `level`）用于级别着色和日志量 |
+| 字段补全与提示 | 查询编辑器按字段目录补全：显示 Grafana 中的字段名、插入 SLS 字段名，并标出能否检索、能否用于 SQL。检索没有索引的字段、在 SLS 语句里写 Grafana 字段名、SQL 用到没有统计的字段时，编辑器会给出提示 |
+| 字段浏览 | 查询编辑器的「Fields」按钮列出 logstore 的全部字段：类型、能否检索、能否用于 SQL、来自哪条规则；修改索引后可刷新 |
 
 上下文依赖每行日志的 `__tag__:__pack_id__` 与 `__pack_meta__`：插件会给检索和 SPL 查询自动追加 `| with_pack_meta`。
+
+## 日志处理
+
+数据源配置的「Logs」决定日志怎样显示，只影响 Grafana 中看到的结果，不改动 SLS 中的数据。
+
+| 配置 | 说明 |
+|---|---|
+| Level field | 级别字段（规则处理之后的名字），默认 `level` |
+| Time field | 作为日志时间的字段，由 `time` 规则写入，默认 `timestamp` |
+| Line fields | 日志行开头依次显示的字段，例如 `host.name`、`host.ip`，用来一眼看出日志来自哪台机器。规则产生的字段只有列在这里才进入日志行 |
+| Other fields in line | 是否在后面接着显示其余业务字段（不含 `__` 开头的元数据），按日志写入时的顺序，默认开。级别字段已由 Grafana 单独显示，不重复放进日志行，需要时可列入 Line fields |
+| Field rules | 按顺序执行的字段规则 |
+
+字段规则：
+
+| 规则 | 示例 | 说明 |
+|---|---|---|
+| `time` | `__time__` + `__time_ns_part__` → `timestamp` | 由秒和可选的纳秒字段合成时间。目标是时间字段时成为日志时间；采集端没有纳秒字段时纳秒按 0 处理 |
+| `rename` | `__tag__:__hostname__` → `host.name` | 改名。筛选与补全会自动换回 SLS 原名 |
+| `extract` | `log.file.path` 按 `/logs/(.+)\.log` 取 `$1` → `service.name` | 正则提取，支持命名分组 `${name}` |
+| `drop` | `__topic__` | 隐藏字段 |
+| `default` | `deployment.environment` = `prod` | 字段缺失或为空时的取值 |
+| `template` | `${service}/${env}` → `app` | 由其他字段拼出新字段，`$$` 表示 `$` |
+
+没有配置规则时使用默认规则：用 `__time__` 和 `__time_ns_part__` 合成 `timestamp`，再隐藏这两个字段。配置页的「Add OpenTelemetry renames」会追加 `host.name`、`host.ip`、`log.file.path` 三条改名规则。除 `rename` 外，规则产生的字段只存在于 Grafana，不能用于筛选。`__tag__:__pack_id__` 与 `__pack_meta__` 是日志上下文需要的字段，不能改名或隐藏；无效的规则会被跳过，并在「Save & test」中列出。
+
+用配置文件创建数据源时：
+
+```yaml
+jsonData:
+  project: my-project
+  logstore: app-log
+  logs:
+    levelField: level
+    line:
+      fields: [host.name, host.ip]
+    rules:
+      - { type: time, from: __time__, nanos: __time_ns_part__, to: timestamp }
+      - { type: drop, field: __time__ }
+      - { type: drop, field: __time_ns_part__ }
+      - { type: rename, from: __tag__:__hostname__, to: host.name }
+      - { type: rename, from: __tag__:__host_ip__, to: host.ip }
+```
 
 ## 从 2.x 迁移
 

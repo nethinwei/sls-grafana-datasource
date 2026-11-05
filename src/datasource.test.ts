@@ -2,7 +2,7 @@ import { CoreApp, type DataSourceInstanceSettings, SupplementaryQueryType } from
 import type { TemplateSrv } from '@grafana/runtime';
 
 import { DEFAULT_SQL, SLSDataSource, toVariableQuery } from './datasource';
-import type { SLSDataSourceOptions } from './types';
+import type { Catalog, SLSDataSourceOptions } from './types';
 
 jest.mock('@grafana/runtime', () => ({
   ...jest.requireActual('@grafana/runtime'),
@@ -58,7 +58,7 @@ describe('toVariableQuery', () => {
 
 describe('log features', () => {
   const ds = new SLSDataSource(
-    { ...settings, jsonData: { ...settings.jsonData, levelField: 'severity' } } as typeof settings,
+    { ...settings, jsonData: { ...settings.jsonData, logs: { levelField: 'severity' } } } as typeof settings,
     passthrough
   );
 
@@ -91,10 +91,57 @@ describe('log features', () => {
     expect(ds.getSupplementaryQuery(volume, { refId: 'A', query: '* | where a > 1' })).toBeUndefined();
   });
 
-  it('applies dashboard ad hoc filters to the search part', () => {
-    const q = ds.applyTemplateVariables({ refId: 'A', query: '* | select count(*) as c' }, {}, [
-      { key: 'service', operator: '=', value: 'api' },
-    ]);
-    expect(q.query).toBe('service: "api" | select count(*) as c');
+  it('sends dashboard ad hoc filters to the backend', () => {
+    const filters = [{ key: 'service', operator: '=', value: 'api' }];
+    const q = ds.applyTemplateVariables({ refId: 'A', query: '* | select count(*) as c' }, {}, filters);
+    expect(q.query).toBe('* | select count(*) as c');
+    expect(q.adhocFilters).toEqual(filters);
+  });
+});
+
+describe('field catalog', () => {
+  const catalog: Catalog = {
+    indexKnown: true,
+    fields: [
+      { name: 'level', type: 'text', indexed: true, stats: true, slsName: 'level' },
+      { name: 'http_status', indexed: false, stats: false, slsName: 'http_status' },
+      { name: 'host.name', type: 'text', indexed: true, stats: true, slsName: '__tag__:__hostname__', rule: 'rename' },
+      { name: 'service.name', rule: 'extract' },
+      { name: '__tag__:__path__', indexed: true, slsName: '__tag__:__path__' },
+    ],
+  };
+  async function loaded() {
+    const ds = new SLSDataSource(settings, passthrough);
+    const post = jest.fn().mockResolvedValue(catalog);
+    ds.postResource = post as never;
+    await ds.getCatalog();
+    return { ds, post };
+  }
+  const q = { refId: 'A', query: 'service: api' };
+  const toggle = (ds: SLSDataSource, key: string, value: string) =>
+    ds.toggleQueryFilter(q, { type: 'FILTER_FOR', options: { key, value } }).query;
+
+  it('filters renamed fields under their SLS name and skips Grafana-only fields', async () => {
+    const { ds } = await loaded();
+    expect(toggle(ds, 'host.name', 'web-1')).toBe('service: api and __tag__:__hostname__: "web-1"');
+    expect(
+      ds.queryHasFilter({ refId: 'A', query: '__tag__:__hostname__: "web-1"' }, { key: 'host.name', value: 'web-1' })
+    ).toBe(true);
+    expect(toggle(ds, 'service.name', 'pay')).toBe('service: api');
+  });
+
+  it('uses SPL where for fields without an index', async () => {
+    const { ds } = await loaded();
+    expect(toggle(ds, 'level', 'ERROR')).toBe('service: api and level: "ERROR"');
+    expect(toggle(ds, 'http_status', '200')).toBe(`service: api | where "http_status" = '200'`);
+    expect(toggle(ds, '__tag__:__path__', '/a.log')).toBe('service: api and __tag__:__path__: "/a.log"');
+  });
+
+  it('offers filterable fields as ad hoc keys and caches the catalog', async () => {
+    const { ds, post } = await loaded();
+    expect((await ds.getTagKeys()).map((k) => k.text)).toEqual(['level', 'http_status', 'host.name']);
+    expect(post).toHaveBeenCalledTimes(1);
+    await ds.getCatalog(undefined, true);
+    expect(post).toHaveBeenCalledTimes(2);
   });
 });

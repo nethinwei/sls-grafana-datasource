@@ -37,7 +37,7 @@
 | 字段 | 来源 | 作用 |
 |---|---|---|
 | `time` | `__time__` + `__time_ns_part__` | 纳秒时间，SDK 序列化时自动带 `nanos` |
-| `message` | 本条日志自己的、不以 `__` 开头的字段，`key="value"`，按字段名排序 | 正文 |
+| `message` | 先是配置的日志行字段，再是本条日志自己的、不以 `__` 开头的字段，按写入顺序，`key="value"`；级别字段由 Grafana 单独显示，不进正文。SDK 把日志解成 map 会丢掉顺序，所以 GetLogs 与 GetContextLogs 用 `LogProject.RawRequest` 发送并按原序解析（`pkg/rawlogs.go`） | 正文 |
 | `id` | `__tag__:__pack_id__` + `/` + `__pack_meta__`；没有时用时间与正文的哈希加行号 | 去重、永久链接 |
 | `level` / `detected_level` | 日志的级别字段；数据源配置的级别字段不叫 `level` 时复制为 `detected_level` | 级别着色（13.2 默认不从正文推断级别） |
 | 其余字段 | 原样逐列输出，包括 `__tag__:*` 和 `__pack_meta__` | 日志详情、➕/➖ 筛选、数据链接、日志上下文 |
@@ -69,6 +69,32 @@ SQL 查询的帧见 1.1。
 | 现状 | 做法 |
 |---|---|
 | 调用 `GetProject`，只有 logstore 级权限的 AK 必定失败 | 先调 `GetLogStore`（需要 `log:GetLogStore`）；失败时退而查 1 分钟窗口、`line=1` 的日志（需要 `log:GetLogStoreLogs`）。在 `JSONDetails` 里写明缺少哪个 RAM Action |
+
+### 1.6 日志处理与字段目录
+
+用户眼中的字段和 SLS 中的字段不一样：规则会改名、隐藏、产生新字段。为了让日志帧、补全、提示、字段浏览和筛选口径一致，所有地方都从同一处取信息，任何一处都不重复规则的逻辑。
+
+```
+jsonData.logs ──compileLogsView──► logsView（每个数据源实例编译一次）
+                                     ├─ rules[]：rule.apply   ──► 日志帧（列式表，rename/drop 为 O(1)）
+                                     └─ rules[]：rule.describe ──► 字段目录（GetIndex ∪ 样本日志，按 logstore 缓存 5 分钟）
+                                                                   ├─ /api/catalog ──► 补全、编辑器提示、字段浏览、➕/➖
+                                                                   └─ 后端翻译看板筛选、字段取值
+```
+
+| 部件 | 位置 | 说明 |
+|---|---|---|
+| 规则注册表 | `pkg/rules.go` 的 `ruleTypes` | 每种规则一个构造函数，返回实现 `apply`（改数据）与 `describe`（告诉字段目录它删了、改名了或产生了哪个字段）的对象 |
+| 日志视图 | `pkg/view.go` | 规则、级别字段、时间字段、日志行配置；由 `describe` 推出改名映射、规则产生的字段 |
+| 字段目录 | `pkg/catalog.go` | 字段名、类型、能否检索、能否用于 SQL、SLS 名、来源规则 |
+| 筛选翻译 | `pkg/filters.go` | 改名换回 SLS 名；有索引用检索，没有索引用 SPL `\| where`；SQL 语句中无法表达的筛选给出提示 |
+| 前端 | `src/datasource.ts`、`src/language/*`、`src/components/FieldRulesEditor.tsx` | 只读字段目录；规则编辑器由 `RULE_SCHEMAS` 描述 |
+
+扩展方式：
+
+- **新增规则类型**：在 `ruleTypes` 中注册构造函数，实现 `apply` 与 `describe`；前端在 `FieldRuleType` 和 `RULE_SCHEMAS` 各加一项。日志行、补全、字段浏览和筛选随 `describe` 自动生效。
+- **新增字段角色**（像级别字段、时间字段这样有特殊含义的字段）：在 `logsConfig` 与 `logsView` 中加一项，在用到它的地方读取。
+- **字段目录增加属性**（例如字段的取值基数）：在 `catalogField` 中加字段，在 `buildCatalog` 中填充，前端直接使用。
 
 ---
 
@@ -120,7 +146,8 @@ SQL 查询的帧见 1.1。
 | 0 | 去掉内网依赖、加 CI 和发布工作流、STS 改走 https；日志正文只拼本条日志自己的字段（PR 1） | 已合入 main |
 | 1 | 后端：两个 SDK 升级、响应语义（1.1）、健康检查（1.5）；删除 MetricStore、SLS Trace、STS 跳转、xcol/ycol 图表模式（第 3 节） | 已合入 main |
 | 2 | 前端：迁移到 create-plugin、13.2 与 React 19、变量与默认查询（1.4）；构建产物不再入库，CI/Release 构建前端 | 已合入 main |
-| 3 | 日志：日志帧（1.2）、➕/➖ 与 Ad hoc 筛选、上下文、日志量（1.3）、字段补全、级别字段 | 代码完成，本地 Grafana 已验证 |
+| 3 | 日志：日志帧（1.2）、➕/➖ 与 Ad hoc 筛选、上下文、日志量（1.3）、字段补全、级别字段 | 已合入 main |
+| 4 | 日志处理与字段目录（1.6）：字段规则、日志行字段、索引感知的补全/提示/字段浏览、后端翻译筛选 | 代码完成 |
 
 阶段 1 和阶段 2 互不依赖，可以交替进行；阶段 3 依赖前两个阶段。
 
@@ -130,4 +157,4 @@ SQL 查询的帧见 1.1。
 2. **SLS SDK 不支持取消**：取消只能让 Grafana 不再等待，SLS 那边的查询会继续跑完。
 3. ~~`columnTypes` 的取值~~：已实测（见 1.1）。
 4. ~~改成规范日志帧的影响~~：决定保留旧帧格式（见 1.2），没有破坏性变化。
-5. **字段列表依赖 `log:GetIndex`**：没有这个权限时退回为从最近 100 条日志中归纳字段，取值同理（字段未开启统计时也一样）。样本之外的字段不会出现在候选里。
+5. **字段目录依赖 `log:GetIndex`**：没有这个权限时退回为从最近 100 条日志中归纳字段，此时不知道字段能否检索，编辑器不给索引相关的提示，筛选按有索引处理。取值同理（字段未开启统计时也一样）。样本之外的字段不会出现在候选里。

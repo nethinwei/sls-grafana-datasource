@@ -13,7 +13,8 @@ import {
 import React, { useEffect, useState } from 'react';
 
 import type { SLSDataSource } from '../datasource';
-import { DEFAULT_MAX_LINES, MAX_MAX_LINES, type SLSDataSourceOptions, type SLSQuery } from '../types';
+import { type Catalog, DEFAULT_MAX_LINES, MAX_MAX_LINES, type SLSDataSourceOptions, type SLSQuery } from '../types';
+import { FieldBrowser } from './FieldBrowser';
 import { SLSQueryField } from './SLSQueryField';
 
 type Props = QueryEditorProps<SLSDataSource, SLSQuery, SLSDataSourceOptions>;
@@ -58,15 +59,21 @@ export function QueryEditor({ datasource, query, onChange, onRunQuery, range }: 
     datasource.getLogstores().then(setLogstores, () => setLogstores([]));
   }, [datasource]);
 
-  // Field names of the chosen logstore for completion (from its index, or a sample of logs).
-  const [fields, setFields] = useState<string[]>([]);
-  const fieldsLogstore = query.logstore?.startsWith('$') ? undefined : query.logstore;
+  // Field catalog of the chosen logstore: completion, hints and the field browser.
+  const [catalog, setCatalog] = useState<Catalog>();
+  const [catalogLoading, setCatalogLoading] = useState(false);
+  const [browsing, setBrowsing] = useState(false);
+  const catalogLogstore = query.logstore?.startsWith('$') ? undefined : query.logstore || undefined;
   useEffect(() => {
-    datasource.getFields(fieldsLogstore).then(
-      (fs) => setFields(fs.map((f) => f.name)),
-      () => setFields([])
-    );
-  }, [datasource, fieldsLogstore]);
+    datasource.getCatalog(catalogLogstore).then(setCatalog, () => setCatalog(undefined));
+  }, [datasource, catalogLogstore]);
+  const refreshCatalog = () => {
+    setCatalogLoading(true);
+    datasource
+      .getCatalog(catalogLogstore, true)
+      .then(setCatalog, () => setCatalog(undefined))
+      .finally(() => setCatalogLoading(false));
+  };
 
   const update = (patch: Partial<SLSQuery>, run = false) => {
     onChange({ ...clean(query), ...patch });
@@ -124,11 +131,28 @@ export function QueryEditor({ datasource, query, onChange, onRunQuery, range }: 
         >
           SLS console
         </Button>
+        <Button
+          variant="secondary"
+          size="md"
+          icon="list-ul"
+          onClick={() => setBrowsing(true)}
+          tooltip="Fields of the logstore: index, SQL statistics and field rules"
+        >
+          Fields
+        </Button>
       </InlineFieldRow>
+      {browsing && (
+        <FieldBrowser
+          catalog={catalog}
+          loading={catalogLoading}
+          onRefresh={refreshCatalog}
+          onDismiss={() => setBrowsing(false)}
+        />
+      )}
 
       <SLSQueryField
         value={query.query ?? ''}
-        fields={fields}
+        catalog={catalog}
         onChange={(v) => update({ query: v })}
         onRunQuery={onRunQuery}
       />

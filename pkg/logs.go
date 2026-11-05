@@ -28,26 +28,21 @@ func (ds *datasource) logsContext(ctx context.Context, logstore string, p *conte
 	if p.Direction == "forward" {
 		back, forward = 1, limit
 	}
-	store, err := sls.NewLogStore(logstore, ds.project)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := call(ctx, func() (*sls.GetContextLogsResponse, error) {
-		return store.GetContextLogs(back, forward, p.PackID, p.PackMeta)
-	})
+	resp, err := ds.contextLogs(ctx, logstore, back, forward, p.PackID, p.PackMeta)
 	if err != nil {
 		return nil, err
 	}
 
 	type row struct {
-		idx int
-		log map[string]string
+		idx  int
+		log  map[string]string
+		keys []string
 	}
 	var rows []row
-	for _, l := range resp.Logs {
+	for i, l := range resp.Logs {
 		idx, _ := strconv.Atoi(l["__index_number__"])
 		if (p.Direction == "forward" && idx > 0) || (p.Direction != "forward" && idx < 0) {
-			rows = append(rows, row{idx, l})
+			rows = append(rows, row{idx, l, resp.Keys[i]})
 		}
 	}
 	sort.Slice(rows, func(a, b int) bool {
@@ -57,10 +52,11 @@ func (ds *datasource) logsContext(ctx context.Context, logstore string, p *conte
 		return rows[a].idx > rows[b].idx
 	})
 	logs := make([]map[string]string, len(rows))
+	keys := make([][]string, len(rows))
 	for i, r := range rows {
-		logs[i] = r.log
+		logs[i], keys[i] = r.log, r.keys
 	}
-	frame := buildLogsFrame(logs, ds.cfg.LevelField)
+	frame := buildLogsFrame(logs, keys, &ds.cfg.view)
 	frame.Meta.ExecutedQueryString = fmt.Sprintf("logstore: %s\nGetContextLogs pack_id=%s pack_meta=%s back_lines=%d forward_lines=%d",
 		logstore, p.PackID, p.PackMeta, back, forward)
 	return data.Frames{frame}, nil
@@ -77,7 +73,7 @@ func (ds *datasource) logsVolume(ctx context.Context, logstore, query string, q 
 		return data.Frames{}, nil
 	}
 	sql, err := applyMacros(fmt.Sprintf(`%s | select $__timeGroup(__time__) as time, %s as level, count(*) as count group by time, level order by time limit 100000`,
-		query, quoteIdentifier(ds.cfg.LevelField)), q.TimeRange, q.Interval)
+		query, quoteIdentifier(ds.cfg.view.levelField)), q.TimeRange, q.Interval)
 	if err != nil {
 		return nil, err
 	}
@@ -113,7 +109,7 @@ func (ds *datasource) logsVolume(ctx context.Context, logstore, query string, q 
 		Type:                data.FrameTypeTimeSeriesMulti,
 		ExecutedQueryString: fmt.Sprintf("logstore: %s\nGetHistograms query: %s", logstore, query),
 		Notices: []data.Notice{{Severity: data.NoticeSeverityInfo,
-			Text: fmt.Sprintf("Enable SQL statistics on field %q to split the volume by level.", ds.cfg.LevelField)}},
+			Text: fmt.Sprintf("Enable SQL statistics on field %q to split the volume by level.", ds.cfg.view.levelField)}},
 	}
 	return data.Frames{f}, nil
 }

@@ -1,10 +1,10 @@
 import {
   addStringFilter,
-  applyAdHocFilters,
-  regexToWildcard,
   hasFieldFilter,
+  hasWhereFilter,
   splitStatement,
   toggleFieldFilter,
+  toggleWhereFilter,
 } from './queryModify';
 
 describe('splitStatement', () => {
@@ -55,31 +55,25 @@ describe('addStringFilter', () => {
   });
 });
 
-describe('applyAdHocFilters', () => {
-  it('turns dashboard filters into search conditions', () => {
-    const q = applyAdHocFilters('* | select count(*) as c', [
-      { key: 'service', operator: '=', value: 'api' },
-      { key: 'level', operator: '!=', value: 'INFO' },
-      { key: 'channel', operator: '=|', value: 'a', values: ['a', 'b'] },
-      { key: 'cost_ms', operator: '>', value: '100' },
-      { key: 'msg', operator: '=~', value: '^time.*' },
-      { key: 'path', operator: '!~', value: '.*health' }, // leading wildcard: not expressible, skipped
-    ]);
-    expect(q).toBe(
-      'service: "api" and not level: "INFO" and (channel: "a" or channel: "b") and cost_ms > 100 and msg: time* | select count(*) as c'
-    );
-    expect(applyAdHocFilters('level: ERROR', [])).toBe('level: ERROR');
-  });
-});
-
-describe('regexToWildcard', () => {
+describe('toggleWhereFilter', () => {
   it.each([
-    ['^pay.*', 'pay*'],
-    ['timeout$', 'timeout'],
-    ['a.c', 'a?c'],
-    ['/api/v1/.*', '/api/v1/*'],
-    ['.*health', undefined],
-    ['(a|b)', undefined],
-    ['has space.*', undefined],
-  ])('%s', (re, want) => expect(regexToWildcard(re)).toBe(want));
+    ['level: ERROR', 'http_status', '200', false, `level: ERROR | where "http_status" = '200'`],
+    [`level: ERROR | where "http_status" = '200'`, 'http_status', '200', false, 'level: ERROR'],
+    [
+      `level: ERROR | where "http_status" = '200'`,
+      'http_status',
+      '200',
+      true,
+      `level: ERROR | where "http_status" != '200'`,
+    ],
+    ['*', 'msg', "it's", false, `* | where "msg" = 'it''s'`],
+    [`* | where "a" = '1'`, 'a', '1', false, '*'],
+  ])('%s  %s=%s negate=%s', (q, k, v, negate, want) => {
+    expect(toggleWhereFilter(q, k, v, negate)).toBe(want);
+  });
+
+  it('detects its own clauses', () => {
+    expect(hasWhereFilter(`* | where "a" = '1'`, 'a', '1')).toBe(true);
+    expect(hasWhereFilter(`* | where "a" != '1'`, 'a', '1')).toBe(false);
+  });
 });

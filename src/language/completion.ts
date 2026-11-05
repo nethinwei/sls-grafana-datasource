@@ -1,5 +1,7 @@
 import type { monacoTypes } from '@grafana/ui';
 
+import { splitStatement } from '../queryModify';
+import type { CatalogField } from '../types';
 import { functions, keywords, operators } from './slsterms';
 
 interface Suggestion {
@@ -8,6 +10,8 @@ interface Suggestion {
   kind: monacoTypes.languages.CompletionItemKind;
   detail?: string;
   snippet?: boolean;
+  filterText?: string;
+  sortText?: string;
 }
 
 // Values of monaco.languages.CompletionItemKind; the enum itself is only available at runtime.
@@ -56,10 +60,10 @@ const STATIC: Suggestion[] = [
   })),
 ];
 
-/** Field names per editor model (keyed by model URI), set by each editor for its logstore. */
-const fieldsByModel = new Map<string, string[]>();
+/** Catalog fields per editor model (keyed by model URI), set by each editor for its logstore. */
+const fieldsByModel = new Map<string, CatalogField[]>();
 
-export function setModelFields(modelUri: string, fields: string[] | undefined) {
+export function setModelFields(modelUri: string, fields: CatalogField[] | undefined) {
   if (fields?.length) {
     fieldsByModel.set(modelUri, fields);
   } else {
@@ -67,9 +71,42 @@ export function setModelFields(modelUri: string, fields: string[] | undefined) {
   }
 }
 
-/** Field names that are not plain identifiers must be quoted in SQL; search accepts them as they are. */
-function fieldSuggestion(name: string): Suggestion {
-  return { label: name, insertText: name, kind: KIND.Field, detail: 'field' };
+export function getModelFields(modelUri: string): CatalogField[] | undefined {
+  return fieldsByModel.get(modelUri);
+}
+
+/** Index state of a field in a few words, e.g. "text · search · SQL". */
+export function fieldSummary(f: CatalogField): string {
+  const parts = [f.type || 'field'];
+  if (f.indexed === false) {
+    parts.push('no index: use | where');
+  } else if (f.indexed) {
+    parts.push(f.stats ? 'search · SQL' : f.stats === false ? 'search only' : 'search');
+  }
+  return parts.join(' · ');
+}
+
+const PLAIN_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/**
+ * A catalog field as a suggestion: shown under its Grafana name, inserting its SLS name (quoted in
+ * SQL / SPL when it is not a plain identifier). Fields produced by rules exist only in Grafana and
+ * are not suggested.
+ */
+function fieldSuggestion(f: CatalogField, inPipe: boolean): Suggestion | undefined {
+  if (!f.slsName) {
+    return undefined;
+  }
+  const insert = inPipe && !PLAIN_IDENTIFIER.test(f.slsName) ? `"${f.slsName.replace(/"/g, '""')}"` : f.slsName;
+  return {
+    label: f.name,
+    insertText: insert,
+    kind: KIND.Field,
+    detail: f.slsName === f.name ? fieldSummary(f) : `${fieldSummary(f)} · SLS: ${f.slsName}`,
+    filterText: f.slsName === f.name ? f.name : `${f.name} ${f.slsName}`,
+    // Searchable fields first.
+    sortText: (f.indexed === false ? '1' : '0') + f.name,
+  };
 }
 
 export function getCompletionProvider(monaco: typeof monacoTypes): monacoTypes.languages.CompletionItemProvider {
@@ -81,12 +118,18 @@ export function getCompletionProvider(monaco: typeof monacoTypes): monacoTypes.l
       const before = model.getLineContent(position.lineNumber).slice(0, word.startColumn - 1);
       const startColumn = before.endsWith('$') ? word.startColumn - 1 : word.startColumn;
       const range = new monaco.Range(position.lineNumber, startColumn, position.lineNumber, word.endColumn);
-      const fields = (fieldsByModel.get(model.uri.toString()) ?? []).map(fieldSuggestion);
+      const textBefore = model.getValueInRange(new monaco.Range(1, 1, position.lineNumber, position.column));
+      const inPipe = splitStatement(textBefore).rest !== '';
+      const fields = (fieldsByModel.get(model.uri.toString()) ?? [])
+        .map((f) => fieldSuggestion(f, inPipe))
+        .filter((s): s is Suggestion => s !== undefined);
       return {
         suggestions: [...fields, ...STATIC].map((s) => ({
           label: s.label,
           kind: s.kind,
           detail: s.detail,
+          filterText: s.filterText,
+          sortText: s.sortText,
           insertText: s.insertText,
           insertTextRules: s.snippet ? monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet : undefined,
           range,

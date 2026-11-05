@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	sls "github.com/aliyun/aliyun-log-go-sdk"
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
@@ -26,6 +27,9 @@ func classifyError(err error) (backend.Status, backend.ErrorSource, string) {
 	switch {
 	case errors.As(err, &slsErr) && slsErr.HTTPCode > 0:
 		msg := fmt.Sprintf("SLS %s: %s", slsErr.Code, slsErr.Message)
+		if strings.Contains(slsErr.Message, "is not config as key value") {
+			msg += ". The field has no index: add a field index in SLS to search it, or filter with SPL, e.g. | where \"field\" = 'value'"
+		}
 		if slsErr.RequestID != "" {
 			msg += " (request ID " + slsErr.RequestID + ")"
 		}

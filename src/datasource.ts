@@ -28,9 +28,16 @@ import { DataSourceWithBackend, getTemplateSrv, type TemplateSrv } from '@grafan
 import { lastValueFrom, type Observable } from 'rxjs';
 
 import { VariableQueryEditor } from './components/VariableQueryEditor';
-import { adHocCondition, addStringFilter, applyAdHocFilters, hasFieldFilter, toggleFieldFilter } from './queryModify';
+import { addStringFilter, hasFieldFilter, hasWhereFilter, toggleFieldFilter, toggleWhereFilter } from './queryModify';
 import { interpolateLogstore, interpolateQuery } from './templating';
-import { QUERY_TYPE_LOGS_CONTEXT, QUERY_TYPE_LOGS_VOLUME, type SLSDataSourceOptions, type SLSQuery } from './types';
+import {
+  type Catalog,
+  type CatalogField,
+  QUERY_TYPE_LOGS_CONTEXT,
+  QUERY_TYPE_LOGS_VOLUME,
+  type SLSDataSourceOptions,
+  type SLSQuery,
+} from './types';
 
 /** Fields the plugin adds to log rows; filtering on them makes no sense in SLS. */
 const SYNTHETIC_FIELDS = new Set([
@@ -44,12 +51,12 @@ const SYNTHETIC_FIELDS = new Set([
 ]);
 
 const CONTEXT_WINDOW_MS = 24 * 3600 * 1000; // GetContextLogs reads at most one day around the log
+const CATALOG_TTL_MS = 5 * 60 * 1000; // same as the backend cache
 
-export interface FieldInfo {
-  name: string;
-  type?: string;
-  /** SQL statistics enabled; needed for value suggestions and group-by. */
-  stats?: boolean;
+interface CatalogEntry {
+  at: number;
+  promise: Promise<Catalog>;
+  value?: Catalog;
 }
 
 /** A search or SPL statement without SQL returns logs; only plain search has a volume histogram. */
@@ -72,6 +79,8 @@ export class SLSDataSource
   readonly defaultLogstore: string;
   readonly project: string;
   readonly levelField: string;
+  /** Field catalogs per logstore ('' = default), see getCatalog. */
+  private readonly catalogs = new Map<string, CatalogEntry>();
 
   constructor(
     settings: DataSourceInstanceSettings<SLSDataSourceOptions>,
@@ -80,8 +89,46 @@ export class SLSDataSource
     super(settings);
     this.defaultLogstore = settings.jsonData.logstore ?? '';
     this.project = settings.jsonData.project ?? '';
-    this.levelField = settings.jsonData.levelField || 'level';
+    this.levelField = settings.jsonData.logs?.levelField || 'level';
     this.variables = new SLSVariableSupport(this);
+  }
+
+  // ---------- field catalog ----------
+
+  /**
+   * Fields of a logstore as the user sees them: index state, SQL statistics, SLS name of renamed
+   * fields and the rule behind derived ones. Completion, query hints, the field browser and filters
+   * all read it. Cached for a few minutes; refresh after changing the index.
+   */
+  getCatalog(logstore?: string, refresh = false): Promise<Catalog> {
+    const key = logstore ?? '';
+    const hit = this.catalogs.get(key);
+    if (hit && !refresh && Date.now() - hit.at < CATALOG_TTL_MS) {
+      return hit.promise;
+    }
+    const entry: CatalogEntry = { at: Date.now(), promise: Promise.resolve({ fields: [], indexKnown: false }) };
+    entry.promise = this.postResource<Partial<Catalog>>('api/catalog', { logstore, refresh }).then(
+      (c) => {
+        entry.value = { fields: c.fields ?? [], indexKnown: Boolean(c.indexKnown), message: c.message };
+        return entry.value;
+      },
+      (e) => {
+        this.catalogs.delete(key);
+        throw e;
+      }
+    );
+    this.catalogs.set(key, entry);
+    return entry.promise;
+  }
+
+  /** A field of an already loaded catalog; undefined when not loaded or unknown. */
+  private catalogField(name: string, logstore?: string): CatalogField | undefined {
+    return this.catalogs.get(this.resolveLogstore(logstore))?.value?.fields.find((f) => f.name === name);
+  }
+
+  private resolveLogstore(logstore?: string): string {
+    const resolved = interpolateLogstore(logstore, {}, this.templateSrv) ?? '';
+    return resolved === this.defaultLogstore ? '' : resolved;
   }
 
   /** Explore starts with a log search; panels and alert rules with an event count over time. */
@@ -93,40 +140,71 @@ export class SLSDataSource
     return !query.hide;
   }
 
-  /** Template variables, then the dashboard's ad hoc filters as search conditions. */
+  /**
+   * Template variables. Dashboard ad hoc filters travel with the query: the backend turns them into
+   * search conditions or SPL where clauses with the field catalog.
+   */
   applyTemplateVariables(query: SLSQuery, scopedVars: ScopedVars, filters?: AdHocVariableFilter[]): SLSQuery {
-    const interpolated = interpolateQuery(query.query ?? '', scopedVars, this.templateSrv);
-    return {
+    const out: SLSQuery = {
       ...query,
-      query: query.queryType === QUERY_TYPE_LOGS_CONTEXT ? interpolated : applyAdHocFilters(interpolated, filters),
+      query: interpolateQuery(query.query ?? '', scopedVars, this.templateSrv),
       logstore: interpolateLogstore(query.logstore, scopedVars, this.templateSrv),
     };
+    if (filters?.length && query.queryType !== QUERY_TYPE_LOGS_CONTEXT) {
+      out.adhocFilters = filters;
+    }
+    if (!query.queryType) {
+      // Field filters (➕ / ➖) need the catalog synchronously: load it with the first query.
+      this.getCatalog(this.resolveLogstore(out.logstore) || undefined).catch(() => undefined);
+    }
+    return out;
   }
 
   // ---------- Explore: ➕ / ➖ on log fields ----------
 
-  /** Grafana shows the level of rows through detected_level when the level field has another name. */
-  private filterKey(key: string): string | undefined {
-    if (key === 'detected_level') {
-      return this.levelField;
+  /**
+   * SLS field behind a field shown in Grafana: detected_level is the level field, renamed fields
+   * (host.name) go back to their SLS name (__tag__:__hostname__). Fields added by the plugin or
+   * produced by rules exist only in Grafana and cannot be filtered.
+   */
+  private filterTarget(key: string, logstore?: string): { key: string; indexed: boolean } | undefined {
+    const name = key === 'detected_level' ? this.levelField : key;
+    if (SYNTHETIC_FIELDS.has(name)) {
+      return undefined;
     }
-    return SYNTHETIC_FIELDS.has(key) ? undefined : key;
+    const field = this.catalogField(name, logstore);
+    if (!field) {
+      return { key: name, indexed: true }; // catalog not loaded yet or field not seen: try as is
+    }
+    return field.slsName ? { key: field.slsName, indexed: field.indexed !== false } : undefined;
   }
 
+  /**
+   * Indexed fields get a search condition (`key: "value"`); fields without an index an SPL
+   * `| where` clause, since SLS search cannot use them.
+   */
   toggleQueryFilter(query: SLSQuery, filter: ToggleFilterAction): SLSQuery {
-    const key = this.filterKey(filter.options.key);
-    if (!key) {
+    const target = this.filterTarget(filter.options.key, query.logstore);
+    if (!target) {
       return query;
     }
+    const negate = filter.type === 'FILTER_OUT';
+    const text = query.query ?? '*';
     return {
       ...query,
-      query: toggleFieldFilter(query.query ?? '*', key, filter.options.value, filter.type === 'FILTER_OUT'),
+      query: target.indexed
+        ? toggleFieldFilter(text, target.key, filter.options.value, negate)
+        : toggleWhereFilter(text, target.key, filter.options.value, negate),
     };
   }
 
   queryHasFilter(query: SLSQuery, filter: QueryFilterOptions): boolean {
-    const key = this.filterKey(filter.key);
-    return Boolean(key) && hasFieldFilter(query.query ?? '', key!, filter.value);
+    const target = this.filterTarget(filter.key, query.logstore);
+    if (!target) {
+      return false;
+    }
+    const text = query.query ?? '';
+    return hasFieldFilter(text, target.key, filter.value) || hasWhereFilter(text, target.key, filter.value);
   }
 
   getSupportedQueryModifications(): string[] {
@@ -154,26 +232,17 @@ export class SLSDataSource
 
   // ---------- dashboards: ad hoc filters ----------
 
-  async getFields(logstore?: string, range?: TimeRange): Promise<FieldInfo[]> {
-    const res = await this.postResource<{ fields?: FieldInfo[] }>('api/fields', {
-      logstore,
-      from: range?.from.valueOf(),
-      to: range?.to.valueOf(),
-    });
-    return res.fields ?? [];
-  }
-
-  async getTagKeys(options?: DataSourceGetTagKeysOptions<SLSQuery>): Promise<MetricFindValue[]> {
-    const fields = await this.getFields(undefined, options?.timeRange);
-    return fields.filter((f) => !f.name.startsWith('__')).map((f) => ({ text: f.name }));
+  /** Filterable fields: SLS fields under their Grafana names, without SLS meta fields. */
+  async getTagKeys(_options?: DataSourceGetTagKeysOptions<SLSQuery>): Promise<MetricFindValue[]> {
+    const catalog = await this.getCatalog();
+    return catalog.fields.filter((f) => f.slsName && !f.name.startsWith('__')).map((f) => ({ text: f.name }));
   }
 
   /** Most frequent values of a field, restricted by the other filters. */
   async getTagValues(options: DataSourceGetTagValuesOptions<SLSQuery>): Promise<MetricFindValue[]> {
-    const others = options.filters.filter((f) => f.key !== options.key);
     const res = await this.postResource<{ values?: string[] }>('api/fieldValues', {
       key: options.key,
-      query: adHocCondition(others),
+      filters: options.filters.filter((f) => f.key !== options.key),
       from: options.timeRange?.from.valueOf(),
       to: options.timeRange?.to.valueOf(),
     });

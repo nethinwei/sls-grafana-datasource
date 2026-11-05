@@ -2,7 +2,7 @@ import type { DataSourceSettings } from '@grafana/data';
 import { fireEvent, render, screen } from '@testing-library/react';
 import React from 'react';
 
-import type { SLSDataSourceOptions, SLSSecureJsonData } from '../types';
+import { DEFAULT_FIELD_RULES, OTEL_FIELD_RULES, type SLSDataSourceOptions, type SLSSecureJsonData } from '../types';
 import { ConfigEditor } from './ConfigEditor';
 
 function options(): DataSourceSettings<SLSDataSourceOptions, SLSSecureJsonData> {
@@ -52,5 +52,39 @@ describe('ConfigEditor', () => {
         secureJsonData: { accessKeyId: '' },
       })
     );
+  });
+});
+
+describe('ConfigEditor logs', () => {
+  const lastJson = (fn: jest.Mock) => fn.mock.calls[fn.mock.calls.length - 1][0].jsonData as SLSDataSourceOptions;
+
+  it('edits the default rules into an own list and resets them', () => {
+    const onChange = jest.fn();
+    const { rerender } = render(<ConfigEditor options={options()} onOptionsChange={onChange} />);
+    expect(screen.getByLabelText('nanos 1')).toHaveValue('__time_ns_part__'); // the default time rule
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add OpenTelemetry renames' }));
+    const rules = lastJson(onChange).logs?.rules ?? [];
+    expect(rules.slice(0, 3)).toEqual(DEFAULT_FIELD_RULES);
+    expect(rules.slice(3)).toEqual(OTEL_FIELD_RULES);
+
+    const opts = options();
+    opts.jsonData.logs = { rules };
+    rerender(<ConfigEditor options={opts} onOptionsChange={onChange} />);
+    fireEvent.change(screen.getByLabelText('to 4'), { target: { value: 'node' } });
+    expect(lastJson(onChange).logs?.rules?.[3]).toEqual({ type: 'rename', from: '__tag__:__hostname__', to: 'node' });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Reset to defaults' }));
+    expect(lastJson(onChange).logs).toBeUndefined();
+  });
+
+  it('sets the level field and the line', () => {
+    const onChange = jest.fn();
+    render(<ConfigEditor options={options()} onOptionsChange={onChange} />);
+    fireEvent.change(screen.getByPlaceholderText('level'), { target: { value: 'severity' } });
+    expect(lastJson(onChange).logs).toEqual({ levelField: 'severity' });
+
+    fireEvent.click(screen.getByLabelText('Other fields in line'));
+    expect(lastJson(onChange).logs).toEqual({ line: { rest: false } });
   });
 });

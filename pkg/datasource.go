@@ -38,6 +38,7 @@ type datasource struct {
 	// makes no request.
 	project   *sls.LogProject
 	resources backend.CallResourceHandler
+	catalogs  catalogCache
 }
 
 func newDatasource(_ context.Context, s backend.DataSourceInstanceSettings) (instancemgmt.Instance, error) {
@@ -142,6 +143,14 @@ func (ds *datasource) runQuery(ctx context.Context, q backend.DataQuery) (res ba
 	if err != nil {
 		return errorResponse(err)
 	}
+	var skipped []string
+	if len(m.AdhocFilters) > 0 {
+		cat, err := ds.catalog(ctx, logstore)
+		if err != nil {
+			log.DefaultLogger.Debug("field catalog unavailable, assuming indexed fields for ad hoc filters", "error", err)
+		}
+		query, skipped = applyAdhocFilters(query, m.AdhocFilters, &ds.cfg.view, cat)
+	}
 	if m.QueryType == queryTypeLogsVolume {
 		frames, err := ds.logsVolume(ctx, logstore, query, q)
 		if err != nil {
@@ -153,6 +162,9 @@ func (ds *datasource) runQuery(ctx context.Context, q backend.DataQuery) (res ba
 	frame, err := ds.execute(ctx, logstore, query, m, q.TimeRange)
 	if err != nil {
 		return errorResponse(err)
+	}
+	for _, s := range skipped {
+		frame.Meta.Notices = append(frame.Meta.Notices, data.Notice{Severity: data.NoticeSeverityWarning, Text: "Ad hoc filter ignored: " + s})
 	}
 	return backend.DataResponse{Frames: data.Frames{frame}}
 }
@@ -184,7 +196,7 @@ func (ds *datasource) execute(ctx context.Context, logstore, query string, m *qu
 		}
 	} else {
 		// Page while the previous page was full and complete.
-		logs, last := first.Logs, first
+		logs, keys, last := first.Logs, first.Keys, first
 		for int64(len(logs)) < m.MaxLines && last.Meta.Progress == "Complete" && int64(len(last.Logs)) == req.Lines {
 			req.Offset += req.Lines
 			req.Lines = min(m.MaxLines-int64(len(logs)), linesPerRequest)
@@ -193,8 +205,9 @@ func (ds *datasource) execute(ctx context.Context, logstore, query string, m *qu
 			}
 			metas = append(metas, last.Meta)
 			logs = append(logs, last.Logs...)
+			keys = append(keys, last.Keys...)
 		}
-		frame = buildLogsFrame(logs, ds.cfg.LevelField)
+		frame = buildLogsFrame(logs, keys, &ds.cfg.view)
 	}
 
 	if frame.Meta == nil {
@@ -205,13 +218,6 @@ func (ds *datasource) execute(ctx context.Context, logstore, query string, m *qu
 	frame.Meta.Stats = queryStats(metas)
 	frame.Meta.Notices = queryNotices(metas)
 	return frame, nil
-}
-
-// getLogs calls GetLogsV3 and stops waiting when ctx is done. The SLS SDK takes no context, so the
-// HTTP request itself is only bounded by the client's request timeout.
-func (ds *datasource) getLogs(ctx context.Context, logstore string, req *sls.GetLogRequest) (*sls.GetLogsV3Response, error) {
-	r := *req // the SDK may be still using it after ctx is done
-	return call(ctx, func() (*sls.GetLogsV3Response, error) { return ds.client.GetLogsV3(ds.cfg.Project, logstore, &r) })
 }
 
 func queryStats(metas []sls.GetLogsV3ResponseMeta) []data.QueryStat {
