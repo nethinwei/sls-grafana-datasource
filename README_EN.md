@@ -25,8 +25,9 @@ Download `aliyun-log-service-datasource-<version>.zip` from [Releases](../../rel
 | Region | Region ID such as `cn-hangzhou`; when set, requests use signature V4 |
 | AccessKey | Prefer a RAM user granted only on the logstores you query |
 | SQL time zone | Zone of date-time strings returned by SQL (timestamp columns, `from_unixtime`, `date_format`). SLS uses UTC+8, hence the default `Asia/Shanghai` |
+| Level field | Field holding the log level, default `level` |
 
-Least privilege: queries need only `log:GetLogStoreLogs`. `log:GetLogStore` improves the health check and `log:ListLogStores` fills the logstore list; without them the plugin falls back to the default logstore.
+Least privilege: queries need only `log:GetLogStoreLogs`. Optional: `log:GetLogStore` (health check), `log:ListLogStores` (logstore list), `log:GetIndex` (field list and completion; otherwise inferred from sample logs), `log:GetLogStoreContextLogs` (log context), `log:GetLogStoreHistogram` (volume when the level field has no SQL statistics).
 
 ## Query
 
@@ -69,6 +70,19 @@ The time range always comes from Grafana's time picker; do not add time conditio
 | Dedicated SQL | Run SQL on the SLS Dedicated SQL engine (more resources, billed separately) |
 
 The Query inspector shows the executed statement and SLS execution statistics; incomplete results are reported as a warning.
+
+## Logs
+
+| Feature | Description |
+|---|---|
+| Logs volume | Explore shows log counts by level over the whole range, computed by SLS (not only the returned rows). Split by level when the level field has SQL statistics enabled, otherwise the total. Search statements only |
+| Filter from fields | ➕ / ➖ in Explore's log details add `key: "value"` / `not key: "value"` to the search; clicking again removes it |
+| Dashboard filters | ➕ / ➖ in dashboard logs panels create the dashboard Filters variable, applied to every query of this data source (SQL panels included). Keys come from the logstore index, values are ordered by frequency; simple regexes in `=~` / `!~` become SLS wildcards |
+| Log context | "Show context" in the log row menu: SLS reads the lines around the log from the same source (GetContextLogs), regardless of the query filters |
+| Level | "Level field" in the data source settings (default `level`) drives level colours and the volume |
+| Field completion | The query editor completes field names from the chosen logstore's index |
+
+Log context needs `__tag__:__pack_id__` and `__pack_meta__` on every row: the plugin appends `| with_pack_meta` to search and SPL queries.
 
 ## Migrating from 2.x
 

@@ -53,3 +53,19 @@ func TestApplyMacros(t *testing.T) {
 		t.Error("expected an error for an invalid $__timeGroup interval")
 	}
 }
+
+func TestWithPackMeta(t *testing.T) {
+	cases := map[string]string{
+		"level: ERROR":                        "level: ERROR | with_pack_meta",
+		"* | where cost > 1":                  "* | where cost > 1 | with_pack_meta",
+		"* | select count(*) as c":            "* | select count(*) as c",
+		"* |SELECT a from log":                "* |SELECT a from log",
+		"level: ERROR | with_pack_meta":       "level: ERROR | with_pack_meta",
+		"* | where a = 'x' | WITH_PACK_META ": "* | where a = 'x' | WITH_PACK_META ",
+	}
+	for in, want := range cases {
+		if got := withPackMeta(in); got != want {
+			t.Errorf("withPackMeta(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

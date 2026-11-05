@@ -25,8 +25,9 @@
 | Region | 地域 ID，例如 `cn-hangzhou`。填写后使用 V4 签名 |
 | AccessKey | 建议使用只授权了目标 logstore 的 RAM 用户 |
 | SQL time zone | SQL 返回的日期时间字符串（`timestamp` 列、`from_unixtime`、`date_format`）的时区，SLS 默认 UTC+8，所以默认 `Asia/Shanghai` |
+| Level field | 日志级别所在的字段，默认 `level` |
 
-最小权限：查询只需要 `log:GetLogStoreLogs`。`log:GetLogStore` 用于健康检查，`log:ListLogStores` 用于 logstore 下拉列表；没有这两项时，插件会自动退回到只使用默认 logstore。
+最小权限：查询只需要 `log:GetLogStoreLogs`。以下权限可选：`log:GetLogStore`（健康检查）、`log:ListLogStores`（logstore 下拉列表）、`log:GetIndex`（字段列表与补全，没有时从样本日志中归纳）、`log:GetLogStoreContextLogs`（日志上下文）、`log:GetLogStoreHistogram`（级别字段未开启统计时的日志量）。
 
 ## 查询
 
@@ -71,6 +72,19 @@
 | Dedicated SQL | 使用 SLS SQL 独享版（资源更多，单独计费） |
 
 查询检查器（Query inspector）会显示实际执行的语句和 SLS 的执行统计；结果不完整（Incomplete）时会给出提示。
+
+## 日志浏览
+
+| 功能 | 说明 |
+|---|---|
+| 日志量直方图 | Explore 中按级别统计整个时间范围的日志量（由 SLS 计算，不只是已返回的行）。级别字段开启了 SQL 统计时按级别拆分，否则只显示总量。只对检索语句生效 |
+| 点字段筛选 | Explore 的日志详情中点 ➕ / ➖，在检索语句中加入 `key: "value"` / `not key: "value"`；再点一次移除 |
+| 看板筛选 | 看板日志面板中点 ➕ / ➖ 会生成看板的 Filters 变量，作用于该数据源的所有查询（包括 SQL 面板）。字段列表来自 logstore 索引，取值按出现次数排序；`=~` / `!~` 中的简单正则会转换为 SLS 通配符 |
+| 日志上下文 | 日志行菜单中的「Show context」：由 SLS 从同一来源读取前后的日志（GetContextLogs），不受当前查询条件限制 |
+| 级别 | 数据源配置中的「Level field」（默认 `level`）用于级别着色和日志量 |
+| 字段补全 | 查询编辑器按所选 logstore 的索引补全字段名 |
+
+上下文依赖每行日志的 `__tag__:__pack_id__` 与 `__pack_meta__`：插件会给检索和 SPL 查询自动追加 `| with_pack_meta`。
 
 ## 从 2.x 迁移
 

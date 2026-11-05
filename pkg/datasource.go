@@ -32,8 +32,11 @@ var (
 // datasource is one configured SLS data source. Grafana creates a new instance whenever the
 // configuration changes and disposes the old one.
 type datasource struct {
-	cfg       *settings
-	client    sls.ClientInterface
+	cfg    *settings
+	client sls.ClientInterface
+	// project serves APIs that the client interface does not expose (GetContextLogs). Building it
+	// makes no request.
+	project   *sls.LogProject
 	resources backend.CallResourceHandler
 }
 
@@ -46,7 +49,8 @@ func newDatasource(_ context.Context, s backend.DataSourceInstanceSettings) (ins
 		ds.resources = newResourceHandler(ds)
 		return ds, nil
 	}
-	client := sls.CreateNormalInterfaceV2(cfg.Endpoint, sls.NewStaticCredentialsProvider(cfg.AccessKeyID, cfg.AccessKeySecret, ""))
+	credentials := sls.NewStaticCredentialsProvider(cfg.AccessKeyID, cfg.AccessKeySecret, "")
+	client := sls.CreateNormalInterfaceV2(cfg.Endpoint, credentials)
 	client.SetUserAgent(userAgent)
 	client.SetRetryTimeout(retryTimeout)
 	if c, ok := client.(*sls.Client); ok {
@@ -56,7 +60,18 @@ func newDatasource(_ context.Context, s backend.DataSourceInstanceSettings) (ins
 		client.SetAuthVersion(sls.AuthV4)
 		client.SetRegion(cfg.Region)
 	}
-	ds := &datasource{cfg: cfg, client: client}
+	project, err := sls.NewLogProjectV2(cfg.Project, cfg.Endpoint, credentials)
+	if err != nil {
+		return nil, err
+	}
+	project = project.WithRequestTimeout(requestTimeout).WithRetryTimeout(retryTimeout)
+	project.UserAgent = userAgent
+	if cfg.Region != "" {
+		project.AuthVersion = sls.AuthV4
+		project.Region = cfg.Region
+	}
+
+	ds := &datasource{cfg: cfg, client: client, project: project}
 	ds.resources = newResourceHandler(ds)
 	return ds, nil
 }
@@ -112,6 +127,13 @@ func (ds *datasource) runQuery(ctx context.Context, q backend.DataQuery) (res ba
 	if logstore == "" {
 		return errorResponse(userError("no logstore: choose one in the query editor or set a default in the data source"))
 	}
+	if m.QueryType == queryTypeLogsContext {
+		frames, err := ds.logsContext(ctx, logstore, m.Context)
+		if err != nil {
+			return errorResponse(err)
+		}
+		return backend.DataResponse{Frames: frames}
+	}
 	query := strings.TrimSpace(m.Query)
 	if query == "" {
 		query = "*"
@@ -119,6 +141,13 @@ func (ds *datasource) runQuery(ctx context.Context, q backend.DataQuery) (res ba
 	query, err = applyMacros(query, q.TimeRange, q.Interval)
 	if err != nil {
 		return errorResponse(err)
+	}
+	if m.QueryType == queryTypeLogsVolume {
+		frames, err := ds.logsVolume(ctx, logstore, query, q)
+		if err != nil {
+			return errorResponse(err)
+		}
+		return backend.DataResponse{Frames: frames}
 	}
 
 	frame, err := ds.execute(ctx, logstore, query, m, q.TimeRange)
@@ -136,7 +165,7 @@ func (ds *datasource) execute(ctx context.Context, logstore, query string, m *qu
 		FromNsPart: int32(tr.From.Nanosecond()),
 		To:         tr.To.Unix(),
 		ToNsPart:   int32(tr.To.Nanosecond()),
-		Query:      query,
+		Query:      withPackMeta(query),
 		Lines:      min(m.MaxLines, linesPerRequest),
 		Reverse:    true,
 		PowerSQL:   m.PowerSQL,
@@ -154,28 +183,25 @@ func (ds *datasource) execute(ctx context.Context, logstore, query string, m *qu
 			return nil, err
 		}
 	} else {
-		logs := first.Logs
-		for int64(len(logs)) < m.MaxLines && first.Meta.Progress == "Complete" && len(first.Logs) == linesPerRequest {
-			req.Offset += linesPerRequest
+		// Page while the previous page was full and complete.
+		logs, last := first.Logs, first
+		for int64(len(logs)) < m.MaxLines && last.Meta.Progress == "Complete" && int64(len(last.Logs)) == req.Lines {
+			req.Offset += req.Lines
 			req.Lines = min(m.MaxLines-int64(len(logs)), linesPerRequest)
-			page, err := ds.getLogs(ctx, logstore, req)
-			if err != nil {
+			if last, err = ds.getLogs(ctx, logstore, req); err != nil {
 				return nil, err
 			}
-			metas = append(metas, page.Meta)
-			logs = append(logs, page.Logs...)
-			if len(page.Logs) < int(req.Lines) || page.Meta.Progress != "Complete" {
-				break
-			}
+			metas = append(metas, last.Meta)
+			logs = append(logs, last.Logs...)
 		}
-		frame = buildLogsFrame(logs)
+		frame = buildLogsFrame(logs, ds.cfg.LevelField)
 	}
 
 	if frame.Meta == nil {
 		frame.Meta = &data.FrameMeta{}
 	}
 	frame.Meta.ExecutedQueryString = fmt.Sprintf("logstore: %s\nfrom: %s\nto: %s\nquery: %s",
-		logstore, tr.From.UTC().Format(time.RFC3339Nano), tr.To.UTC().Format(time.RFC3339Nano), query)
+		logstore, tr.From.UTC().Format(time.RFC3339Nano), tr.To.UTC().Format(time.RFC3339Nano), req.Query)
 	frame.Meta.Stats = queryStats(metas)
 	frame.Meta.Notices = queryNotices(metas)
 	return frame, nil

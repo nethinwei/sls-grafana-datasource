@@ -11,7 +11,7 @@ interface Suggestion {
 }
 
 // Values of monaco.languages.CompletionItemKind; the enum itself is only available at runtime.
-const KIND = { Function: 1, Variable: 4, Keyword: 17, Operator: 11, Snippet: 27 } as const;
+const KIND = { Function: 1, Field: 3, Variable: 4, Keyword: 17, Operator: 11, Snippet: 27 } as const;
 
 export const MACROS: Suggestion[] = [
   {
@@ -56,6 +56,22 @@ const STATIC: Suggestion[] = [
   })),
 ];
 
+/** Field names per editor model (keyed by model URI), set by each editor for its logstore. */
+const fieldsByModel = new Map<string, string[]>();
+
+export function setModelFields(modelUri: string, fields: string[] | undefined) {
+  if (fields?.length) {
+    fieldsByModel.set(modelUri, fields);
+  } else {
+    fieldsByModel.delete(modelUri);
+  }
+}
+
+/** Field names that are not plain identifiers must be quoted in SQL; search accepts them as they are. */
+function fieldSuggestion(name: string): Suggestion {
+  return { label: name, insertText: name, kind: KIND.Field, detail: 'field' };
+}
+
 export function getCompletionProvider(monaco: typeof monacoTypes): monacoTypes.languages.CompletionItemProvider {
   return {
     triggerCharacters: ['$'],
@@ -65,8 +81,9 @@ export function getCompletionProvider(monaco: typeof monacoTypes): monacoTypes.l
       const before = model.getLineContent(position.lineNumber).slice(0, word.startColumn - 1);
       const startColumn = before.endsWith('$') ? word.startColumn - 1 : word.startColumn;
       const range = new monaco.Range(position.lineNumber, startColumn, position.lineNumber, word.endColumn);
+      const fields = (fieldsByModel.get(model.uri.toString()) ?? []).map(fieldSuggestion);
       return {
-        suggestions: STATIC.map((s) => ({
+        suggestions: [...fields, ...STATIC].map((s) => ({
           label: s.label,
           kind: s.kind,
           detail: s.detail,
