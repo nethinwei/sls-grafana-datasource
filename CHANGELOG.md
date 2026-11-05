@@ -1,5 +1,26 @@
 # Changelog
 
+# 2.39.2-fork.1（未发布）
+
+基于上游 2.39.2 的 fork，面向 Grafana 13.2 重写。详见 README 的「从 2.x 迁移」与 docs/design/grafana-13-adaptation.md。
+
+**不兼容变更**
+
+- 只支持 Grafana ≥ 13.2。
+- 删除 MetricStore（PromQL）与自定义请求头、SLS Trace、STS 免登跳转、xcol/ycol 图表模式、`$1m` 与 `#time_begin` / `#time_end` 写法。
+- 构建产物不再提交到仓库，由 Release 工作流从源码构建。
+
+**新增与改进**
+
+- 后端基于 grafana-plugin-sdk-go v0.296 与 GetLogsV3 重写：返回 HTTP 状态与错误来源（下游 / 插件），查询检查器显示实际语句与 SLS 执行统计，结果不完整时提示而不是报错，支持取消与超时。
+- 用 SLS 返回的 `hasSQL` 区分检索与 SQL，SPL 按日志返回。
+- SQL 结果按列类型输出；带时间列时自动转为时间序列，按字符串列拆分。
+- 宏：`$__timeGroup`、`$__interval_s`、`$__timeFrom`、`$__timeTo`；数据源配置新增 SQL 时区。
+- 日志正文只包含这条日志自己的字段，不含元数据与空字段；时间支持纳秒。
+- 健康检查与 logstore 列表支持只授权到 logstore 的 AccessKey。
+- 前端迁移到 @grafana/create-plugin、@grafana/* 13.2、React 19；新的查询编辑器（SLS 语法高亮与补全）、配置页与变量编辑器；检索中的 `key: $var` 多值变量自动展开。
+- 去掉内网依赖，外部可以构建；STS 签名请求改用 https（该功能随后已删除）。
+
 # 2.39.2 (2026-09-09)
 
 - 新增 GitHub Actions 手动打包流程，按已有 tag 校验并打包已提交的 dist，提供安装 ZIP 和 SHA256 校验文件。

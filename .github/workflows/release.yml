@@ -1,7 +1,7 @@
 name: Release
 
-# Pushing a tag such as 2.39.2-fork.1 builds every backend binary from source, packages it with the
-# committed frontend dist/, and publishes a GitHub Release with the installable ZIP and its SHA256.
+# Pushing a tag such as 2.39.2-fork.1 builds the frontend and every backend binary from source and
+# publishes a GitHub Release with the installable ZIP and its SHA256.
 on:
   push:
     tags: ['*-fork.*']
@@ -24,23 +24,39 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Check versions match the tag
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Check the version matches the tag
         env:
           TAG: ${{ github.ref_name }}
         run: |
           pkg=$(jq -r .version package.json)
-          plugin=$(jq -r .info.version dist/plugin.json)
-          if [ "$pkg" != "$TAG" ] || [ "$plugin" != "$TAG" ]; then
-            echo "tag=$TAG package.json=$pkg dist/plugin.json=$plugin must all match"; exit 1
+          if [ "$pkg" != "$TAG" ]; then
+            echo "tag=$TAG package.json=$pkg must match"; exit 1
           fi
-          if [ "$(jq -r .id dist/plugin.json)" != aliyun-log-service-datasource ]; then
-            echo "unexpected plugin id"; exit 1
-          fi
+
+      - name: Test and build the frontend
+        run: |
+          npm ci
+          npm run typecheck
+          npm run test:ci
+          npm run build
 
       - name: Test and build backends
         run: |
           go test ./pkg/
           make all
+
+      - name: Check the built plugin
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          test "$(jq -r .info.version dist/plugin.json)" = "$TAG"
+          test "$(jq -r .id dist/plugin.json)" = aliyun-log-service-datasource
+          ls dist/module.js dist/gpx_log-service-datasource_linux_amd64 dist/gpx_log-service-datasource_linux_arm64
 
       - name: Package
         id: package

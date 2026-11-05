@@ -1,300 +1,121 @@
 import {
-  TraceLog,
-  TraceKeyValuePair,
-  TraceSpanRow,
-  DataFrame,
-  DataQueryRequest,
-  DataQueryResponse,
-  DataSourceInstanceSettings,
-  FieldType,
-  MutableDataFrame,
-  Vector,
-  MetricFindValue,
+  CoreApp,
+  CustomVariableSupport,
+  type DataQueryRequest,
+  type DataQueryResponse,
+  type DataSourceInstanceSettings,
+  type ScopedVars,
+  type TimeRange,
 } from '@grafana/data';
-import { defaultQuery, SLSDataSourceOptions, SLSQuery } from './types';
-import { DataSourceWithBackend, getBackendSrv, getTemplateSrv } from '@grafana/runtime';
-import _ from 'lodash';
-import { map } from 'rxjs/operators';
+import { DataSourceWithBackend, getTemplateSrv, type TemplateSrv } from '@grafana/runtime';
+import type { Observable } from 'rxjs';
+
+import { VariableQueryEditor } from './components/VariableQueryEditor';
+import { interpolateLogstore, interpolateQuery } from './templating';
+import type { SLSDataSourceOptions, SLSQuery } from './types';
+
+/** Default SQL for new panels and alert rules: event count over time. */
+export const DEFAULT_SQL =
+  '* | select $__timeGroup(__time__) as time, count(*) as count group by time order by time limit 10000';
 
 export class SLSDataSource extends DataSourceWithBackend<SLSQuery, SLSDataSourceOptions> {
-  constructor(instanceSettings: DataSourceInstanceSettings<SLSDataSourceOptions>) {
-    super(instanceSettings);
+  readonly defaultLogstore: string;
+  readonly project: string;
+
+  constructor(
+    settings: DataSourceInstanceSettings<SLSDataSourceOptions>,
+    private readonly templateSrv: TemplateSrv = getTemplateSrv()
+  ) {
+    super(settings);
+    this.defaultLogstore = settings.jsonData.logstore ?? '';
+    this.project = settings.jsonData.project ?? '';
+    this.variables = new SLSVariableSupport(this);
   }
 
-  query(options: DataQueryRequest<SLSQuery>) {
-    // console.log("into query.")
-    options.targets.forEach((q: SLSQuery) => {
-      q.query = replaceQueryParameters(q, options);
-      if(/__custom__@/.test(q?.logstore ?? '')){
-        const currentLogstore: any = getTemplateSrv().getVariables().find((item) => item.name === q?.logstore?.split('@')[1]);
-        const value = currentLogstore?.current?.value;
-        q.logstore = value;
-      }
-    });
-    if (options.targets[0].xcol === 'trace') {
-      return super.query(options).pipe(map(responseToDataQueryResponse));
-    }
-    return super.query(options);
+  /** Explore starts with a log search; panels and alert rules with an event count over time. */
+  getDefaultQuery(app: CoreApp): Partial<SLSQuery> {
+    return app === CoreApp.Explore ? { query: '*' } : { query: DEFAULT_SQL };
   }
 
-  metricFindQuery(query: SLSQuery | string, options?: any): Promise<MetricFindValue[]> {
-    const _defaultQuery = { ...defaultQuery, ...(typeof query === 'string' ? { query } : query)}
-    const { type, logstore, queryType, legendFormat, step } = _defaultQuery;
-    const data = {
-      from: options.range.from.valueOf().toString(),
-      to: options.range.to.valueOf().toString(),
-      queries: [
-        {
-          // datasource: this.name,
-          datasource: { type: this.type, uid: this.uid },
-          datasourceId: this.id,
-          query: replaceQueryParameters(_defaultQuery.query || '', options),
-          type,
-          logstore,
-          queryType,
-          legendFormat,
-          step,
-        },
-      ],
+  filterQuery(query: SLSQuery): boolean {
+    return !query.hide;
+  }
+
+  applyTemplateVariables(query: SLSQuery, scopedVars: ScopedVars): SLSQuery {
+    return {
+      ...query,
+      query: interpolateQuery(query.query ?? '', scopedVars, this.templateSrv),
+      logstore: interpolateLogstore(query.logstore, scopedVars, this.templateSrv),
     };
+  }
 
-    return new Promise(async (resolve) => {
-      let values: any[] = [];
+  getQueryDisplayText(query: SLSQuery): string {
+    const logstore = query.logstore || this.defaultLogstore;
+    return (logstore ? `${logstore}: ` : '') + (query.query ?? '');
+  }
 
-      try {
-        const response = await getBackendSrv().post('/api/ds/query', data);
-        values = response.results.A.frames ?? []
-      } catch (error) {
-        console.log('error', error)
-      }
-      const res = mapToTextValueNew(values);
-      resolve(res);
+  /** Logstores of the project; least-privilege AccessKeys only get the default logstore back. */
+  async getLogstores(): Promise<string[]> {
+    const res = await this.postResource<{ data?: string[] | null }>('api/getLogstoreList', {});
+    return res.data ?? [];
+  }
+
+  /** SLS console URL showing the same query and time range. */
+  async getConsoleUrl(query: SLSQuery, range: TimeRange, scopedVars: ScopedVars = {}): Promise<string> {
+    const q = this.applyTemplateVariables(query, scopedVars);
+    const params = new URLSearchParams({
+      encode: 'base64',
+      queryString: base64(q.query || '*'),
+      queryTimeType: '99',
+      startTime: String(range.from.unix()),
+      endTime: String(range.to.unix()),
     });
-  }
-}
-
-function valueToTag(key: any, value: any): TraceKeyValuePair {
-  return {
-    key,
-    value,
-  };
-}
-
-function transServiceTags(result: Map<string, Vector>, i: number): TraceKeyValuePair[] {
-  const resource = JSON.parse(result.get('resource')?.get(i));
-  const resourceArray = Array.from(Object.entries(resource), ([name, value]) => valueToTag(name, value));
-  resourceArray.push(valueToTag('host', result.get('host')?.get(i)));
-  return resourceArray;
-}
-
-function transTags(result: Map<string, Vector>, i: number): TraceKeyValuePair[] {
-  const attribute = JSON.parse(result.get('attribute')?.get(i));
-  const resourceArray = Array.from(Object.entries(attribute), ([name, value]) => valueToTag(name, value));
-  resourceArray.push(valueToTag('statusCode', result.get('statusCode')?.get(i)));
-  resourceArray.push(valueToTag('statusMessage', result.get('statusMessage')?.get(i)));
-  return resourceArray;
-}
-
-function transLogs(result: Map<string, Vector>, i: number): TraceLog[] {
-  let traceLogs: TraceLog[] = [];
-  const slsLogs = JSON.parse(result.get('logs')?.get(i)) as Object[];
-  for (const slsLog of slsLogs) {
-    const logMap = new Map(Object.entries(slsLog));
-    const attributeArray = Array.from(Object.entries(slsLog), ([name, value]) => valueToTag(name, value));
-    let time = logMap.get('time');
-    if (time !== undefined) {
-      traceLogs.push({
-        timestamp: Number(time) / 1000000,
-        fields: attributeArray,
-      });
-    }
-  }
-  return traceLogs;
-}
-
-function transformSpan(df: DataFrame): TraceSpanRow[] {
-  let traceSpanRows: TraceSpanRow[] = [];
-  const fields = df.fields;
-  const result = new Map(fields.map((key) => [key.name, key.values]));
-  for (let i = 0; i < df.length; i++) {
-    const tsd = {
-      traceID: result.get('traceID')?.get(i),
-      spanID: result.get('spanID')?.get(i),
-      parentSpanID: result.get('parentSpanID')?.get(i),
-      operationName: result.get('operationName')?.get(i),
-      serviceName: result.get('serviceName')?.get(i),
-      serviceTags: transServiceTags(result, i),
-      startTime: result.get('startTime')?.get(i),
-      duration: result.get('duration')?.get(i),
-      tags: transTags(result, i),
-      errorIconColor: result.get('statusCode')?.get(i) === 'ERROR' ? '#f00' : '',
-      logs: transLogs(result, i),
-    };
-    traceSpanRows.push(tsd);
-  }
-  return traceSpanRows;
-}
-
-export function transformResponse(df: DataFrame): DataFrame {
-  const spanRows = transformSpan(df);
-  const frame = new MutableDataFrame({
-    fields: [
-      { name: 'traceID', type: FieldType.string },
-      { name: 'spanID', type: FieldType.string },
-      { name: 'parentSpanID', type: FieldType.string },
-      { name: 'operationName', type: FieldType.string },
-      { name: 'serviceName', type: FieldType.string },
-      { name: 'serviceTags', type: FieldType.other },
-      { name: 'startTime', type: FieldType.number },
-      { name: 'duration', type: FieldType.number },
-      { name: 'logs', type: FieldType.other },
-      { name: 'tags', type: FieldType.other },
-      { name: 'errorIconColor', type: FieldType.string },
-    ],
-    meta: {
-      preferredVisualisationType: 'trace',
-    },
-  });
-
-  for (const span of spanRows) {
-    frame.add(span);
-  }
-
-  return frame;
-}
-
-function responseToDataQueryResponse(response: DataQueryResponse): DataQueryResponse {
-  return {
-    data: [transformResponse(response.data[0])],
-  };
-}
-
-export function mapToTextValue(result: any) {
-  if (Array.isArray(result) && result.length === 2) {
-    return _.map(result[0], (d, i) => {
-      return { text: d, value: result[1][i] };
+    const res = await this.postResource<{ url?: string; message?: string }>('api/gotoSLS', {
+      logstore: q.logstore,
+      encoding: params.toString(),
     });
-  }
-  return _.map(result[0], (d, i) => {
-    if (d && d.text && d.value) {
-      return { text: d.text, value: d.value };
-    } else if (_.isObject(d)) {
-      return { text: d, value: i };
+    if (!res.url) {
+      throw new Error(res.message || 'cannot build the SLS console URL');
     }
-    return { text: d, value: d };
-  });
-}
-
-export function mapToTextValueNew(frames: any): MetricFindValue[] {
-
-  if(!frames || !Array.isArray(frames) || frames?.length === 0 ) {
-    return []
-  }
-
-  const TextValues: MetricFindValue[] = [];
-  for(const frame of frames) {
-    if(frame.data?.values?.length > 0) {
-      const fieldsValues = frame.data.values
-      // 如果只有两列 默认第一列为text
-      if(fieldsValues.length === 2) {
-        for(let i = 0; i < fieldsValues[0].length; i++) {
-          TextValues.push({ text: fieldsValues[0][i], value: fieldsValues[1][i] });
-        }
-      } else {
-        for(let rowIndx = 0; rowIndx < fieldsValues[0].length; rowIndx++) {
-
-          // 保存之前的逻辑
-          const columnBaseItem = fieldsValues[0][rowIndx] // 默认都是用第一项来处理
-          if(columnBaseItem && columnBaseItem.text && columnBaseItem.value) {
-            TextValues.push({ text: columnBaseItem.text, value: columnBaseItem.value });
-          } else if (_.isObject(columnBaseItem)){
-            TextValues.push({ text: safeJsonStringify(columnBaseItem), value: rowIndx });
-          } else {
-            // 把每一项的值拼接起来
-            const resValue = fieldsValues.reduce((str: string, field: any[]) => str += field[rowIndx] + " " , '')
-            TextValues.push({ text: resValue?.trim?.(), value: resValue?.trim?.() });
-          }
-
-        }
-      }
-    }
-  }
-
-  return TextValues
-}
-
-function safeJsonStringify(obj: any) {
-  try {
-    return JSON.stringify(obj);
-  } catch (error) {
-    return obj;
+    return res.url;
   }
 }
 
-export function replaceFormat(
-  value: { forEach: (arg0: (v: string) => void) => void; join: (arg0: string) => void },
-  variable: { multi: any; includeAll: any; name: string; label: any; description: string }
-) {
-if (typeof value === 'object' && (variable.multi || variable.includeAll)) {
-  const a: string[] = [];
-  value.forEach(function (v: string) {
-    if (variable.name === variable.label || (variable.description && variable.description.indexOf('field_search') >= 0)) {
-      a.push('"' + variable.name + '":"' + v + '"');
-    } else {
-      a.push(v);
-    }
-  });
-  return a.join(' OR ');
-}
-if (_.isArray(value)) {
-  return value.join(' OR ');
-}
-return value;
+function base64(s: string): string {
+  const bytes = new TextEncoder().encode(s);
+  let bin = '';
+  bytes.forEach((b) => (bin += String.fromCharCode(b)));
+  return btoa(bin);
 }
 
+/** Variable query in dashboards saved by plugin 2.x: a plain string, or wrapped by schema v2. */
+type StoredVariableQuery = SLSQuery | string | { __legacyStringValue?: string };
 
-export function replaceQueryParameters(q: SLSQuery | string, options: DataQueryRequest<SLSQuery>) {
-  if (typeof q !== 'string' && q.hide) {
-    return;
+export function toVariableQuery(stored: StoredVariableQuery | undefined): SLSQuery {
+  if (typeof stored === 'string') {
+    return { refId: 'variable', query: stored };
   }
-  let varQuery;
-  if (typeof q === 'string') {
-    varQuery = q;
-  } else {
-    varQuery = q.query;
+  if (stored && '__legacyStringValue' in stored && typeof stored.__legacyStringValue === 'string') {
+    return { refId: 'variable', query: stored.__legacyStringValue };
   }
-  let query = getTemplateSrv().replace(
-    varQuery,
-    options.scopedVars,
-    replaceFormat
-  );
+  const q = (stored ?? {}) as Partial<SLSQuery>;
+  return { ...q, refId: q.refId || 'variable' };
+}
 
-  const re = /\$([0-9]+)([dmhs])/g;
-  const reArray = query.match(re);
-  _(reArray).forEach(function (col) {
-    const old = col;
-    col = col.replace('$', '');
-    let sec = 1;
-    if (col.indexOf('s') !== -1) {
-      sec = 1;
-    } else if (col.indexOf('m') !== -1) {
-      sec = 60;
-    } else if (col.indexOf('h') !== -1) {
-      sec = 3600;
-    } else if (col.indexOf('d') !== -1) {
-      sec = 3600 * 24;
-    }
-    col = col.replace(/[smhd]/g, '');
-    let v = parseInt(col, 10);
-    v = v * sec;
-    console.log(old, v, col, sec, query);
-    query = query.replace(old, String(v));
-  });
-  if (query.indexOf('#time_end') !== -1) {
-    query = query.replace('#time_end', String(options.range.to.unix() / 1000));
+/**
+ * Variables run a normal query through the backend; Grafana turns the first field of the result
+ * (or fields named `text` / `value`) into options, e.g.
+ * `* | select service_name from log group by service_name limit 500`.
+ */
+export class SLSVariableSupport extends CustomVariableSupport<SLSDataSource, SLSQuery> {
+  editor = VariableQueryEditor;
+
+  constructor(private readonly datasource: SLSDataSource) {
+    super();
   }
-  if (query.indexOf('#time_begin') !== -1) {
-    query = query.replace('#time_begin', String(options.range.from.unix() / 1000));
+
+  query(request: DataQueryRequest<SLSQuery>): Observable<DataQueryResponse> {
+    const targets = request.targets.map((t) => toVariableQuery(t as StoredVariableQuery));
+    return this.datasource.query({ ...request, targets });
   }
-  return query;
 }

@@ -1,73 +1,40 @@
-import { DataQuery, DataSourceJsonData } from '@grafana/data';
+import type { DataSourceJsonData } from '@grafana/data';
+import type { DataQuery } from '@grafana/schema';
 
+/**
+ * One SLS query. A search statement (`level: ERROR`) or SPL returns log rows; a statement with SQL
+ * (`* | select ...`) returns a typed table, or time series when it has a time column.
+ *
+ * Fields from plugin 2.x (xcol, ycol, logsPerPage, totalLogs, ...) may still be present in saved
+ * dashboards. The backend reads the ones that still make sense; the editor drops the rest on change.
+ */
 export interface SLSQuery extends DataQuery {
   query?: string;
-  xcol?: string;
-  ycol?: string;
-  logsPerPage?: number;
-  currentPage?: number;
-  type?: string;
-  logstore?: string
-  legendFormat?: string // 图例 format
-  step?: string // promql step
-  queryType?: 'range' | 'instant'; // 查询类型
-  totalLogs?: number
-  powerSql?: boolean
+  /** Logstore; empty means the data source default. */
+  logstore?: string;
+  /** Max log rows for search queries (SQL is limited by its LIMIT). */
+  maxLines?: number;
+  /** Column used as time for SQL results. Default `time`. */
+  timeColumn?: string;
+  /** Run SQL on the Dedicated SQL engine. */
+  powerSql?: boolean;
 }
 
-export const defaultQuery: Partial<SLSQuery> = {
-  type: 'all',
-  query: '* | select count(*) as c, __time__-__time__%60 as t group by t',
-  xcol: 't',
-  ycol: '',
-  logsPerPage: 100,
-  currentPage: 1,
-  totalLogs: 100,
-  powerSql: false
-};
-export const defaultEidtorQuery: Partial<SLSQuery> = {
-  type: 'all',
-  query: '',
-  xcol: '',
-  ycol: '',
-  logsPerPage: 100,
-  currentPage: 1,
-  totalLogs: 100,
-  powerSql: false
-};
+export const DEFAULT_MAX_LINES = 1000;
+export const MAX_MAX_LINES = 5000;
 
-/**
- * These are options configured for each DataSource instance
- */
 export interface SLSDataSourceOptions extends DataSourceJsonData {
-  endpoint?: string;
   project?: string;
   logstore?: string;
-  roleArn?: string;
+  /** Region ID such as cn-hangzhou; when set, requests are signed with AuthV4. */
   region?: string;
+  /** Open the console on alibabacloud.com instead of aliyun.com. */
   international?: boolean;
-  headers?: HeaderWithValue[]
+  /** Time zone of date-time strings returned by SLS SQL. Default Asia/Shanghai (UTC+8). */
+  sqlTimeZone?: string;
 }
 
-/**
- * Value that is used in the backend, but never sent over HTTP to the frontend
- */
 export interface SLSSecureJsonData {
   accessKeyId?: string;
   accessKeySecret?: string;
 }
-
-// export declare type SlsLog = {
-//   time: number;
-//   attribute: Map<string, string>;
-//   name: string;
-// };
-
-export type Header = {
-  name: string;
-  configured: boolean;
-};
-
-export type HeaderWithValue = Header & { value: string };
-
-export type LocalHeader = HeaderWithValue & { id: string };

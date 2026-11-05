@@ -91,7 +91,7 @@ SQL 查询、带 xcol/ycol 的图表查询，帧结构不变。
 |---|---|---|
 | MetricStore（PromQL）及自定义请求头 | 与 Grafana 原生 Prometheus 数据源重复；请求头的值存在明文的 jsonData 里 | 用 Grafana 的 Prometheus 数据源连 SLS 时序库 |
 | xcol / ycol 图表模式（`#:#`、bar、pie、map、stat、table） | 为 Grafana 7 的面板设计 | SQL 结果统一输出带类型的帧；有时间列时自动长表转宽表；饼图、柱状图交给 Grafana 面板和变换 |
-| `$1m` 换算、`#time_begin` / `#time_end` | 私有语法 | 宏：`$__timeGroup(col[, 5m])`、`$__interval_s`、`$__timeFrom`、`$__timeTo`（`$1m` 的换算在前端，阶段 2 删除） |
+| `$1m` 换算、`#time_begin` / `#time_end` | 私有语法 | 宏：`$__timeGroup(col[, 5m])`、`$__interval_s`、`$__timeFrom`、`$__timeTo` |
 | 分页三件套（`logsPerPage`、`currentPage`、`totalLogs`） | 不填就只返回 1 行 | `maxLines`（默认 1000，上限 5000），插件内部翻页；旧字段仍会被读取 |
 | SLS Trace（`xcol=trace`） | 链路数据通常放在 Tempo、Jaeger 等专用后端，Grafana 有原生数据源；维护前端转换代码的成本高 | — |
 | STS 免登跳转（roleArn） | 凭据流转最多、安全面最大 | 普通的「在 SLS 控制台打开」 |
@@ -116,9 +116,9 @@ SQL 查询、带 xcol/ycol 的图表查询，帧结构不变。
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
-| 0 | 去掉内网依赖、加 CI 和发布工作流、STS 改走 https；日志正文只拼本条日志自己的字段（PR 1） | 已提交（本地） |
-| 1 | 后端：两个 SDK 升级、响应语义（1.1）、健康检查（1.5）；删除 MetricStore、SLS Trace、STS 跳转、xcol/ycol 图表模式（第 3 节） | 代码完成，devenv 已验证 |
-| 2 | 前端：迁移到 create-plugin、13.2 与 React 19、变量与默认查询（1.4） | — |
+| 0 | 去掉内网依赖、加 CI 和发布工作流、STS 改走 https；日志正文只拼本条日志自己的字段（PR 1） | 已合入 main |
+| 1 | 后端：两个 SDK 升级、响应语义（1.1）、健康检查（1.5）；删除 MetricStore、SLS Trace、STS 跳转、xcol/ycol 图表模式（第 3 节） | 已合入 main |
+| 2 | 前端：迁移到 create-plugin、13.2 与 React 19、变量与默认查询（1.4）；构建产物不再入库，CI/Release 构建前端 | 代码完成，本地 Grafana 已验证 |
 | 3 | 日志：规范日志帧（1.2）、➕/➖ 与 Ad hoc 筛选、上下文、日志量（1.3） | — |
 
 阶段 1 和阶段 2 互不依赖，可以交替进行；阶段 3 依赖前两个阶段。

@@ -1,27 +1,20 @@
 {
-  "$schema": "https://raw.githubusercontent.com/grafana/grafana/master/docs/sources/developers/plugins/plugin.schema.json",
+  "$schema": "https://raw.githubusercontent.com/grafana/grafana/main/docs/sources/developers/plugins/plugin.schema.json",
   "type": "datasource",
-  "name": "log-service-datasource",
+  "name": "Alibaba Cloud Log Service (SLS)",
   "id": "aliyun-log-service-datasource",
   "metrics": true,
   "backend": true,
   "logs": true,
   "alerting": true,
   "executable": "gpx_log-service-datasource",
-  "flow_chart_max_points": "6000000",
-  "legacy_compatible": false,
   "info": {
-    "description": "Aliyun log service datasource (backend version)",
+    "description": "Query logs and run SQL on Alibaba Cloud Log Service (SLS)",
     "author": {
       "name": "aliyun-log",
       "url": "https://aliyun.com/product/sls"
     },
-    "keywords": [
-      "sls",
-      "aliyun",
-      "log",
-      "日志服务"
-    ],
+    "keywords": ["sls", "aliyun", "log", "日志服务"],
     "logos": {
       "small": "img/sls_logo.jpg",
       "large": "img/sls_logo.jpg"
@@ -41,7 +34,7 @@
     "updated": "%TODAY%"
   },
   "dependencies": {
-    "grafanaDependency": ">=7.0.0",
+    "grafanaDependency": ">=13.2.0",
     "plugins": []
   }
 }
