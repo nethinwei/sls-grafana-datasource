@@ -1,35 +1,45 @@
 {
   "$schema": "https://raw.githubusercontent.com/grafana/grafana/main/docs/sources/developers/plugins/plugin.schema.json",
   "type": "datasource",
-  "name": "Alibaba Cloud Log Service (SLS)",
-  "id": "aliyun-log-service-datasource",
+  "name": "nethinwei-sls-datasource",
+  "id": "nethinwei-sls-datasource",
   "metrics": true,
   "backend": true,
   "logs": true,
   "alerting": true,
-  "executable": "gpx_log-service-datasource",
+  "executable": "gpx_sls-datasource",
   "info": {
-    "description": "Query logs and run SQL on Alibaba Cloud Log Service (SLS)",
+    "description": "Community data source for Alibaba Cloud Log Service (SLS): logs, SQL and alerting. Not affiliated with Alibaba Cloud.",
     "author": {
-      "name": "aliyun-log",
-      "url": "https://aliyun.com/product/sls"
+      "name": "nethinwei",
+      "url": "https://github.com/nethinwei/sls-grafana-datasource"
     },
     "keywords": ["sls", "aliyun", "log", "日志服务"],
     "logos": {
-      "small": "img/sls_logo.jpg",
-      "large": "img/sls_logo.jpg"
+      "small": "img/logo.svg",
+      "large": "img/logo.svg"
     },
     "links": [
       {
         "name": "Website",
+        "url": "https://github.com/nethinwei/sls-grafana-datasource"
+      },
+      {
+        "name": "Upstream",
         "url": "https://github.com/aliyun/aliyun-log-grafana-datasource-plugin"
       },
       {
         "name": "License",
-        "url": "https://github.com/aliyun/aliyun-log-grafana-datasource-plugin/blob/master/LICENSE"
+        "url": "https://github.com/nethinwei/sls-grafana-datasource/blob/main/LICENSE"
       }
     ],
-    "screenshots": [],
+    "screenshots": [
+      { "name": "Explore", "path": "img/screenshots/explore-logs.png" },
+      { "name": "Log details", "path": "img/screenshots/explore-details.png" },
+      { "name": "Field browser", "path": "img/screenshots/field-browser.png" },
+      { "name": "Logs settings", "path": "img/screenshots/config-logs.png" },
+      { "name": "Field rules", "path": "img/screenshots/config-rules.png" }
+    ],
     "version": "%VERSION%",
     "updated": "%TODAY%"
   },

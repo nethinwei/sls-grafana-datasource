@@ -117,7 +117,9 @@ function RuleParams({
 }) {
   return (
     <>
-      {RULE_SCHEMAS[rule.type].params.map((p, i) => {
+      {(
+        RULE_SCHEMAS[rule.type]?.params ?? [{ text: `unknown rule type "${rule.type}": choose a type or remove it` }]
+      ).map((p, i) => {
         if ('text' in p) {
           return (
             <Text key={i} color="secondary">
@@ -172,9 +174,9 @@ export function FieldRulesEditor({ value, onChange }: Props) {
     <Stack direction="column" gap={1}>
       <Text color="secondary">
         Rules run in order on every query result and only change what Grafana shows. Fields renamed by{' '}
-        <code>rename</code> can be filtered on (filters use the SLS name); fields produced by the other rules exist only
-        in Grafana. <code>__tag__:__pack_id__</code> and <code>__pack_meta__</code> are needed by log context and cannot
-        be renamed or dropped.
+        <code>rename</code> (filters use the SLS name) and flattened by <code>json</code> (filters read the JSON) can be
+        filtered on; fields produced by the other rules exist only in Grafana. <code>__tag__:__pack_id__</code> and{' '}
+        <code>__pack_meta__</code> are needed by log context and cannot be renamed or dropped.
         {isDefault && ' Showing the default rules; editing them saves your own list.'}
       </Text>
       {rules.map((rule, i) => (

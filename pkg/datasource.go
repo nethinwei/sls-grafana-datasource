@@ -15,12 +15,17 @@ import (
 )
 
 const (
-	userAgent = "grafana-sls-datasource"
+	userAgent = "nethinwei-sls-datasource"
 	// Per HTTP request to SLS. A Grafana query that pages through logs makes several requests and is
 	// bounded by the request context instead.
-	requestTimeout = 30 * time.Second
-	retryTimeout   = 45 * time.Second
+	requestTimeout = 60 * time.Second
 )
+
+// pageParallelism is how many pages of log rows are requested at once.
+const pageParallelism = 4
+
+// retryTimeout bounds the retries of one SLS request (network errors and 5xx responses).
+var retryTimeout = 90 * time.Second
 
 var (
 	_ backend.QueryDataHandler      = (*datasource)(nil)
@@ -33,15 +38,17 @@ var (
 // configuration changes and disposes the old one.
 type datasource struct {
 	cfg    *settings
+	cfgErr error // why cfg is nil
 	client sls.ClientInterface
 	// project serves APIs that the client interface does not expose (GetContextLogs). Building it
 	// makes no request.
 	project   *sls.LogProject
 	resources backend.CallResourceHandler
 	catalogs  catalogCache
-	// learned remembers fields that query results produced (name → SPL expression, "" when SLS
-	// cannot filter on it), for filters on fields the catalog's sample missed.
-	learned sync.Map
+	// learned remembers, per logstore, fields that query results produced (name → SPL expression,
+	// "" when SLS cannot filter on it), for filters on fields the catalog's sample missed.
+	learnedMu sync.Mutex
+	learned   map[string]map[string]string
 }
 
 func newDatasource(_ context.Context, s backend.DataSourceInstanceSettings) (instancemgmt.Instance, error) {
@@ -49,7 +56,7 @@ func newDatasource(_ context.Context, s backend.DataSourceInstanceSettings) (ins
 	if err != nil {
 		// Still create the instance so that health check and queries can report the problem.
 		log.DefaultLogger.Warn("invalid data source settings", "error", err)
-		ds := &datasource{}
+		ds := &datasource{cfgErr: err}
 		ds.resources = newResourceHandler(ds)
 		return ds, nil
 	}
@@ -70,9 +77,9 @@ func newDatasource(_ context.Context, s backend.DataSourceInstanceSettings) (ins
 	}
 	project = project.WithRequestTimeout(requestTimeout).WithRetryTimeout(retryTimeout)
 	project.UserAgent = userAgent
-	if cfg.Region != "" {
-		project.AuthVersion = sls.AuthV4
-		project.Region = cfg.Region
+	// Sign like the client, which also switches to V4 by itself for some regions (acdr).
+	if c, ok := client.(*sls.Client); ok {
+		project.AuthVersion, project.Region = c.AuthVersion, c.Region
 	}
 
 	ds := &datasource{cfg: cfg, client: client, project: project}
@@ -93,13 +100,15 @@ func (ds *datasource) CallResource(ctx context.Context, req *backend.CallResourc
 // QueryData runs every query concurrently.
 func (ds *datasource) QueryData(ctx context.Context, req *backend.QueryDataRequest) (*backend.QueryDataResponse, error) {
 	resp := backend.NewQueryDataResponse()
+	// Alert rules evaluate whatever data they get: they must not get partial results silently.
+	fromAlert := req.Headers["FromAlert"] == "true"
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	for _, q := range req.Queries {
 		wg.Add(1)
 		go func(q backend.DataQuery) {
 			defer wg.Done()
-			r := ds.runQuery(ctx, q)
+			r := ds.runQuery(ctx, q, fromAlert)
 			mu.Lock()
 			resp.Responses[q.RefID] = r
 			mu.Unlock()
@@ -109,7 +118,7 @@ func (ds *datasource) QueryData(ctx context.Context, req *backend.QueryDataReque
 	return resp, nil
 }
 
-func (ds *datasource) runQuery(ctx context.Context, q backend.DataQuery) (res backend.DataResponse) {
+func (ds *datasource) runQuery(ctx context.Context, q backend.DataQuery, fromAlert bool) (res backend.DataResponse) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.DefaultLogger.Error("query panicked", "refId", q.RefID, "panic", r)
@@ -118,7 +127,7 @@ func (ds *datasource) runQuery(ctx context.Context, q backend.DataQuery) (res ba
 	}()
 
 	if ds.cfg == nil {
-		return errorResponse(userError("data source is not configured: check endpoint, project and AccessKey"))
+		return errorResponse(userError("data source settings are invalid: %v", ds.cfgErr))
 	}
 	m, err := parseQuery(q)
 	if err != nil {
@@ -152,7 +161,7 @@ func (ds *datasource) runQuery(ctx context.Context, q backend.DataQuery) (res ba
 		if err != nil {
 			log.DefaultLogger.Debug("field catalog unavailable, assuming indexed fields for ad hoc filters", "error", err)
 		}
-		query, skipped = applyAdhocFilters(query, m.AdhocFilters, &ds.cfg.view, cat, ds.learnedField)
+		query, skipped = applyAdhocFilters(query, m.AdhocFilters, &ds.cfg.view, cat, ds.learnedFields(logstore))
 	}
 	if m.QueryType == queryTypeLogsVolume {
 		frames, err := ds.logsVolume(ctx, logstore, query, q)
@@ -162,7 +171,7 @@ func (ds *datasource) runQuery(ctx context.Context, q backend.DataQuery) (res ba
 		return backend.DataResponse{Frames: frames}
 	}
 
-	frame, err := ds.execute(ctx, logstore, query, m, q.TimeRange)
+	frame, err := ds.execute(ctx, logstore, query, m, q.TimeRange, fromAlert)
 	if err != nil {
 		return errorResponse(err)
 	}
@@ -172,33 +181,97 @@ func (ds *datasource) runQuery(ctx context.Context, q backend.DataQuery) (res ba
 	return backend.DataResponse{Frames: data.Frames{frame}}
 }
 
-// learnFields remembers what a logs frame says about the fields rules produced (see
-// buildLogsFrame), for filters on fields the catalog's sample missed.
-func (ds *datasource) learnFields(frame *data.Frame) {
-	custom, _ := frame.Meta.Custom.(map[string]any)
-	if names, ok := custom[grafanaOnlyFieldsKey].([]string); ok {
-		for _, n := range names {
-			ds.learned.Store(n, "")
-		}
+// filterDescriptor tells the frontend how SLS filters a field of a result, exactly as dashboard
+// filters are translated (filterTarget), so Explore's ➕ / ➖ write the same conditions without
+// repeating the rules. A nil descriptor: the field exists only in Grafana and cannot be filtered.
+type filterDescriptor struct {
+	Key    string `json:"key,omitempty"` // SLS field for search conditions
+	Expr   string `json:"expr"`          // SPL expression for where clauses
+	Search bool   `json:"search"`        // write a search condition (the field is indexed)
+}
+
+// Frame meta keys read by the frontend.
+const (
+	filterFieldsKey = "filterFields"
+	logstoreKey     = "logstore"
+)
+
+// describeFilters learns what the rules produced in a logs frame, then replaces that internal meta
+// with a filter descriptor per field.
+func (ds *datasource) describeFilters(ctx context.Context, logstore string, frame *data.Frame) {
+	ds.learnFields(logstore, frame)
+	cat, err := ds.catalog(ctx, logstore)
+	if err != nil {
+		log.DefaultLogger.Debug("field catalog unavailable, describing filters without it", "error", err)
 	}
-	if exprs, ok := custom[fieldExprsKey].(map[string]string); ok {
-		for n, e := range exprs {
-			ds.learned.Store(n, e)
+	learned := ds.learnedFields(logstore)
+	out := make(map[string]*filterDescriptor, len(frame.Fields))
+	for _, f := range frame.Fields {
+		switch f.Name {
+		case "time", "message", "id": // added by the plugin
+			out[f.Name] = nil
+			continue
 		}
+		t, ok := filterTarget(f.Name, &ds.cfg.view, cat, learned)
+		if !ok {
+			out[f.Name] = nil
+			continue
+		}
+		out[f.Name] = &filterDescriptor{Key: t.name, Expr: t.expr, Search: t.indexed && t.name != ""}
+	}
+	if frame.Meta == nil {
+		frame.Meta = &data.FrameMeta{}
+	}
+	frame.Meta.Custom = map[string]any{filterFieldsKey: out, logstoreKey: logstore}
+}
+
+// maxLearnedFields bounds the fields remembered per logstore; past it the memory starts over.
+const maxLearnedFields = 5000
+
+// learnFields remembers what a logs frame of a logstore says about the fields rules produced (see
+// buildLogsFrame), for filters on fields the catalog's sample missed.
+func (ds *datasource) learnFields(logstore string, frame *data.Frame) {
+	custom, _ := frame.Meta.Custom.(map[string]any)
+	names, _ := custom[grafanaOnlyFieldsKey].([]string)
+	exprs, _ := custom[fieldExprsKey].(map[string]string)
+	if len(names) == 0 && len(exprs) == 0 {
+		return
+	}
+	ds.learnedMu.Lock()
+	defer ds.learnedMu.Unlock()
+	if ds.learned == nil {
+		ds.learned = map[string]map[string]string{}
+	}
+	m := ds.learned[logstore]
+	if m == nil || len(m)+len(names)+len(exprs) > maxLearnedFields {
+		m = map[string]string{}
+		ds.learned[logstore] = m
+	}
+	for _, n := range names {
+		m[n] = ""
+	}
+	for n, e := range exprs {
+		m[n] = e
 	}
 }
 
-func (ds *datasource) learnedField(name string) (string, bool) {
-	v, ok := ds.learned.Load(name)
-	if !ok {
-		return "", false
+// learnedFields returns what was learned about the fields of a logstore.
+func (ds *datasource) learnedFields(logstore string) learnedFields {
+	return func(name string) (string, bool) {
+		ds.learnedMu.Lock()
+		defer ds.learnedMu.Unlock()
+		e, ok := ds.learned[logstore][name]
+		return e, ok
 	}
-	return v.(string), true
 }
 
 // execute sends the query with GetLogsV3. Whether it is SQL is decided by SLS (meta.hasSQL), not by
 // looking for "|" in the text: SPL also uses pipes but returns log rows.
-func (ds *datasource) execute(ctx context.Context, logstore, query string, m *queryModel, tr backend.TimeRange) (*data.Frame, error) {
+func (ds *datasource) execute(ctx context.Context, logstore, query string, m *queryModel, tr backend.TimeRange, fromAlert bool) (*data.Frame, error) {
+	budget := completeRetryDashboard
+	if fromAlert {
+		budget = completeRetryAlert
+	}
 	req := &sls.GetLogRequest{
 		From:       tr.From.Unix(),
 		FromNsPart: int32(tr.From.Nanosecond()),
@@ -209,7 +282,7 @@ func (ds *datasource) execute(ctx context.Context, logstore, query string, m *qu
 		Reverse:    true,
 		PowerSQL:   m.PowerSQL,
 	}
-	first, err := ds.getLogs(ctx, logstore, req)
+	first, err := ds.getLogsComplete(ctx, logstore, req, budget)
 	if err != nil {
 		return nil, err
 	}
@@ -217,27 +290,61 @@ func (ds *datasource) execute(ctx context.Context, logstore, query string, m *qu
 	var frame *data.Frame
 	metas := []sls.GetLogsV3ResponseMeta{first.Meta}
 	if first.Meta.HasSQL {
-		frame, err = buildSQLFrame(first.Meta.Keys, first.Meta.ColumnTypes, first.Logs, m.TimeColumn, ds.cfg.sqlLocation)
+		timeColumn := m.TimeColumn
+		if m.Format == formatTable {
+			timeColumn = "" // keep the table as it is
+		}
+		frame, err = buildSQLFrame(first.Meta.Keys, first.Meta.ColumnTypes, first.Logs, timeColumn, ds.cfg.sqlLocation, ds.cfg.Limits.MaxWideCells)
 		if err != nil {
 			return nil, err
 		}
 	} else {
-		// Page while the previous page was full and complete.
-		logs, keys, last := first.Logs, first.Keys, first
-		for int64(len(logs)) < m.MaxLines && last.Meta.Progress == "Complete" && int64(len(last.Logs)) == req.Lines {
-			req.Offset += req.Lines
-			req.Lines = min(m.MaxLines-int64(len(logs)), linesPerRequest)
-			if last, err = ds.getLogs(ctx, logstore, req); err != nil {
-				return nil, err
+		// Page while pages come back full and complete, a few pages at a time.
+		logs, keys := first.Logs, first.Keys
+		more := !incomplete(first.Meta) && int64(len(first.Logs)) == req.Lines
+		for more && int64(len(logs)) < m.MaxLines {
+			var batch []*sls.GetLogRequest
+			for offset := int64(len(logs)); offset < m.MaxLines && len(batch) < pageParallelism; offset += linesPerRequest {
+				r := *req
+				r.Offset, r.Lines = offset, min(m.MaxLines-offset, linesPerRequest)
+				batch = append(batch, &r)
 			}
-			metas = append(metas, last.Meta)
-			logs = append(logs, last.Logs...)
-			keys = append(keys, last.Keys...)
+			pages := make([]*logsResponse, len(batch))
+			errs := make([]error, len(batch))
+			var wg sync.WaitGroup
+			for i, r := range batch {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					pages[i], errs[i] = ds.getLogsComplete(ctx, logstore, r, budget)
+				}()
+			}
+			wg.Wait()
+			for i, page := range pages {
+				if errs[i] != nil {
+					return nil, errs[i]
+				}
+				metas = append(metas, page.Meta)
+				logs = append(logs, page.Logs...)
+				keys = append(keys, page.Keys...)
+				if incomplete(page.Meta) || int64(len(page.Logs)) < batch[i].Lines {
+					more = false
+					break
+				}
+			}
 		}
 		frame = buildLogsFrame(logs, keys, &ds.cfg.view)
-		ds.learnFields(frame)
+		ds.describeFilters(ctx, logstore, frame)
 	}
 
+	if fromAlert {
+		for _, meta := range metas {
+			if incomplete(meta) {
+				return nil, backend.DownstreamErrorf("SLS returned incomplete results after retrying for %s (progress: %s); "+
+					"an alert must not evaluate partial data. Narrow the time range, or enable Dedicated SQL (powerSql)", budget, meta.Progress)
+			}
+		}
+	}
 	if frame.Meta == nil {
 		frame.Meta = &data.FrameMeta{}
 	}
@@ -246,6 +353,39 @@ func (ds *datasource) execute(ctx context.Context, logstore, query string, m *qu
 	frame.Meta.Stats = queryStats(metas)
 	frame.Meta.Notices = queryNotices(metas)
 	return frame, nil
+}
+
+// How long a query keeps asking SLS until its results are complete (SLS returns progress
+// "Incomplete" while it is still reading data, typically for heavy queries or the latest seconds).
+// Alert rules need complete counts; dashboards prefer a prompt answer with a notice.
+var (
+	completeRetryDashboard = 5 * time.Second
+	completeRetryAlert     = 30 * time.Second
+	completeFirstWait      = 100 * time.Millisecond
+	completeMaxWait        = 2 * time.Second
+)
+
+func incomplete(m sls.GetLogsV3ResponseMeta) bool {
+	return m.Progress != "" && m.Progress != "Complete"
+}
+
+// getLogsComplete repeats a GetLogs request while SLS reports incomplete results, as the SDK's
+// GetLogsToCompleted does, within budget. It returns the last response, complete or not.
+func (ds *datasource) getLogsComplete(ctx context.Context, logstore string, req *sls.GetLogRequest, budget time.Duration) (*logsResponse, error) {
+	deadline := time.Now().Add(budget)
+	wait := completeFirstWait
+	for {
+		resp, err := ds.getLogs(ctx, logstore, req)
+		if err != nil || !incomplete(resp.Meta) || time.Now().Add(wait).After(deadline) {
+			return resp, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(wait):
+		}
+		wait = min(wait*2, completeMaxWait)
+	}
 }
 
 func queryStats(metas []sls.GetLogsV3ResponseMeta) []data.QueryStat {

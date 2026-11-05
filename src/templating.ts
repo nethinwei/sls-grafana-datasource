@@ -11,8 +11,6 @@ const FIELD_VAR = /([\w.@:-]+?)\s*:\s*\$(?:\{(\w+)(?::\w+)?\}|(\w+))/g;
 type VarLike = Pick<TypedVariableModel, 'name'> & {
   multi?: boolean;
   includeAll?: boolean;
-  label?: string;
-  description?: string | null;
 };
 
 function isMultiValued(v: VarLike | undefined): boolean {
@@ -34,18 +32,9 @@ function variableValues(name: string, scopedVars: ScopedVars | undefined, templa
   }
 }
 
-/**
- * Formatter for variables that are not used as `key: $var`. Kept compatible with plugin 2.x:
- * multi values are joined with " OR ", and variables whose description contains `field_search`
- * (or whose name equals their label) render as `"name":"value"` pairs.
- */
-export function legacyMultiValueFormat(value: unknown, variable: VarLike): string {
-  if (Array.isArray(value)) {
-    const fieldSearch = variable.name === variable.label || Boolean(variable.description?.includes('field_search'));
-    const parts = value.map((v) => (fieldSearch ? `"${variable.name}":"${v}"` : String(v)));
-    return parts.join(' OR ');
-  }
-  return String(value ?? '');
+/** Multi values of variables that are not used as `key: $var` are joined with " OR ". */
+export function multiValueFormat(value: unknown): string {
+  return Array.isArray(value) ? value.map(String).join(' OR ') : String(value ?? '');
 }
 
 /** Replaces template variables in an SLS query. */
@@ -64,20 +53,14 @@ export function interpolateQuery(query: string, scopedVars: ScopedVars | undefin
     return '(' + values.map((v) => `${key}: ${quote(v)}`).join(' or ') + ')';
   });
 
-  return templateSrv.replace(expanded, scopedVars, (value: unknown, variable: VarLike) =>
-    legacyMultiValueFormat(value, variable)
-  );
+  return templateSrv.replace(expanded, scopedVars, multiValueFormat);
 }
 
-/** Plugin 2.x stored logstores picked from a variable as `__custom__@name`. */
+/** Replaces template variables in a logstore name. */
 export function interpolateLogstore(
   logstore: string | undefined,
   scopedVars: ScopedVars | undefined,
   templateSrv: TemplateSrv
 ): string {
-  if (!logstore) {
-    return '';
-  }
-  const legacy = /^__custom__@(.+)$/.exec(logstore);
-  return templateSrv.replace(legacy ? '$' + legacy[1] : logstore, scopedVars);
+  return logstore ? templateSrv.replace(logstore, scopedVars) : '';
 }

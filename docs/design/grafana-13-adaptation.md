@@ -3,7 +3,7 @@
 目标：在 Grafana 13.2 上，让 SLS 数据源的查询、日志浏览、变量、告警体验尽量接近 Grafana 原生日志数据源（Loki），同时充分利用 SLS 自身的接口能力。
 
 - 基线：上游 `aliyun/aliyun-log-grafana-datasource-plugin` 2.39.2。
-- 主线：`main`，版本号 `2.39.2-fork.N`。插件 ID 不变，数据源配置与已保存的查询向后兼容。
+- 主线：`main`。2026-11 起独立维护：插件 ID 改为 `nethinwei-sls-datasource`，版本从 `v0.1.0` 起按语义化版本发布，不再兼容 2.x 的查询写法（迁移见 README）。
 - 目标运行环境：**只支持 Grafana ≥ 13.2**（`grafanaDependency: ">=13.2.0"`），不再兼顾 7.x～12.x。
 
 资料来源：
@@ -59,7 +59,7 @@ SQL 查询的帧见 1.1。
 | Grafana 期望 | 现状 | 做法 |
 |---|---|---|
 | 在 `applyTemplateVariables` 里替换变量，不修改传入的查询对象 | 在 `query()` 里替换，而且直接修改了 targets | 移到 `applyTemplateVariables`，返回新对象。`interpolateVariablesInQueries` 用默认实现，「在 Explore 中打开」和告警因此都正确 |
-| 多值变量的格式化 | 私有约定 `field_search` | 新增自动识别：查询里出现 `key: $var` 时，展开为 `(key: "a" or key: "b")`，并转义引号。`field_search` 继续兼容 |
+| 多值变量的格式化 | 私有约定 `field_search` | 查询里出现 `key: $var` 时，展开为 `(key: "a" or key: "b")`，并转义引号；其他位置的多值用 ` OR ` 连接。不再兼容 `field_search`（Grafana 13 的变量格式化拿不到变量描述） |
 | `CustomVariableSupport` | 已废弃的 `setVariableQueryEditor`，加上手动 POST `/api/ds/query`（带数字 id） | 改为 `CustomVariableSupport`，查询走 `DataSourceWithBackend` |
 | `getDefaultQuery(app)` | 固定一条统计 SQL | Explore 里默认 `*`（日志）；告警里默认统计 SQL；看板沿用当前的默认查询 |
 | `getQueryDisplayText`、`filterQuery` | 无 | 在查询历史里显示 logstore 和语句；隐藏的查询不执行 |
@@ -87,12 +87,12 @@ jsonData.logs ──compileLogsView──► logsView（每个数据源实例编
 | 规则注册表 | `pkg/rules.go` 的 `ruleTypes` | 每种规则一个构造函数，返回实现 `apply`（改数据）与 `describe`（告诉字段目录它删了、改名了或产生了哪个字段）的对象 |
 | 日志视图 | `pkg/view.go` | 规则、级别字段、时间字段、日志行配置；由 `describe` 推出改名映射、规则产生的字段 |
 | 字段目录 | `pkg/catalog.go` | 字段名、类型、能否检索、能否用于 SQL、SLS 名、来源规则 |
-| 筛选翻译 | `pkg/filters.go` | 改名换回 SLS 名；有索引用检索，没有索引用 SPL `\| where`；SQL 语句中无法表达的筛选给出提示 |
+| 筛选翻译 | `pkg/filters.go`、`describeFilters`（`pkg/datasource.go`） | 改名换回 SLS 名；有索引用检索，没有索引用 SPL `\| where`；SQL 语句中无法表达的筛选给出提示；结果帧下发每个字段的筛选描述 |
 | 前端 | `src/datasource.ts`、`src/language/*`、`src/components/FieldRulesEditor.tsx` | 只读字段目录；规则编辑器由 `RULE_SCHEMAS` 描述 |
 
 扩展方式：
 
-- **字段如何被筛选**：规则产生的字段只存在于 Grafana。改名的字段换回 SLS 名；`json` 展开的字段带 SPL 表达式（`json_extract_scalar`）；其余规则产生的字段不能筛选。这些信息由字段目录（索引与样本）和查询结果帧（`meta.custom` 中的 `grafanaOnlyFields`、`fieldExprs`）提供，前后端都会记住结果帧里出现过的字段，样本没覆盖到的字段也能正确筛选。
+- **字段如何被筛选**：只由后端决定（`filterTarget`）。改名的字段换回 SLS 名；有索引的字段用检索，没有索引的用 SPL `| where`；`json` 展开的字段用 `coalesce("名", json_extract_scalar(...))`，同时匹配采集端已展开的存储；其余规则产生的字段不能筛选。看板筛选在后端直接翻译；Explore 的 ➕/➖ 必须在前端同步改写查询，所以每个日志结果帧在 `meta.custom.filterFields` 里带上每个字段的筛选描述（SLS 名、SPL 表达式、是否用检索），前端只查表、不推导。两边都要把条件写成 SLS 语法（语句切分、`and` 拼接、检索与 where 条件的转义），这部分由 `testdata/filter-syntax.json` 的共享用例约束，Go 与 Jest 测试都跑这组用例，保证逐字一致。
 - **新增规则类型**：在 `ruleTypes` 中注册构造函数，实现 `apply` 与 `describe`；前端在 `FieldRuleType` 和 `RULE_SCHEMAS` 各加一项。日志行、补全、字段浏览和筛选随 `describe` 自动生效。
 - **新增字段角色**（像级别字段、时间字段这样有特殊含义的字段）：在 `logsConfig` 与 `logsView` 中加一项，在用到它的地方读取。
 - **字段目录增加属性**（例如字段的取值基数）：在 `catalogField` 中加字段，在 `buildCatalog` 中填充，前端直接使用。
@@ -120,7 +120,7 @@ jsonData.logs ──compileLogsView──► logsView（每个数据源实例编
 | MetricStore（PromQL）及自定义请求头 | 与 Grafana 原生 Prometheus 数据源重复；请求头的值存在明文的 jsonData 里 | 用 Grafana 的 Prometheus 数据源连 SLS 时序库 |
 | xcol / ycol 图表模式（`#:#`、bar、pie、map、stat、table） | 为 Grafana 7 的面板设计 | SQL 结果统一输出带类型的帧；有时间列时自动长表转宽表；饼图、柱状图交给 Grafana 面板和变换 |
 | `$1m` 换算、`#time_begin` / `#time_end` | 私有语法 | 宏：`$__timeGroup(col[, 5m])`、`$__interval_s`、`$__timeFrom`、`$__timeTo` |
-| 分页三件套（`logsPerPage`、`currentPage`、`totalLogs`） | 不填就只返回 1 行 | `maxLines`（默认 1000，上限 5000），插件内部翻页；旧字段仍会被读取 |
+| 分页三件套（`logsPerPage`、`currentPage`、`totalLogs`） | 不填就只返回 1 行 | `maxLines`（默认 1000，上限 5000），插件内部每批并发请求 4 页；不再读取旧字段 |
 | SLS Trace（`xcol=trace`） | 链路数据通常放在 Tempo、Jaeger 等专用后端，Grafana 有原生数据源；维护前端转换代码的成本高 | — |
 | STS 免登跳转（roleArn） | 凭据流转最多、安全面最大 | 普通的「在 SLS 控制台打开」 |
 | 流式接口空实现、`legacy_compatible`、`flow_chart_max_points` | 模板遗留 / 废代码 | — |
@@ -140,7 +140,7 @@ jsonData.logs ──compileLogsView──► logsView（每个数据源实例编
 
 ## 5. 分阶段
 
-每个阶段都在本地 Grafana 13.2 上用真实的 SLS logstore 和浏览器验证。每个阶段结束时提交、发一个 `2.39.2-fork.N` 版本。
+每个阶段都在本地 Grafana 13.2 上用真实的 SLS logstore 和浏览器验证。各阶段合入 main，统一发布为 v0.1.0。
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
@@ -148,7 +148,7 @@ jsonData.logs ──compileLogsView──► logsView（每个数据源实例编
 | 1 | 后端：两个 SDK 升级、响应语义（1.1）、健康检查（1.5）；删除 MetricStore、SLS Trace、STS 跳转、xcol/ycol 图表模式（第 3 节） | 已合入 main |
 | 2 | 前端：迁移到 create-plugin、13.2 与 React 19、变量与默认查询（1.4）；构建产物不再入库，CI/Release 构建前端 | 已合入 main |
 | 3 | 日志：日志帧（1.2）、➕/➖ 与 Ad hoc 筛选、上下文、日志量（1.3）、字段补全、级别字段 | 已合入 main |
-| 4 | 日志处理与字段目录（1.6）：字段规则、日志行字段、索引感知的补全/提示/字段浏览、后端翻译筛选 | 代码完成 |
+| 4 | 日志处理与字段目录（1.6）：字段规则、日志行字段与顺序、索引感知的补全/提示/字段浏览、后端翻译筛选、嵌套 JSON 展开与筛选 | 已合入 main，发布为 v0.1.0 |
 
 阶段 1 和阶段 2 互不依赖，可以交替进行；阶段 3 依赖前两个阶段。
 

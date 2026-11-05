@@ -1,7 +1,7 @@
 {
-  "name": "aliyun-log-service-datasource",
-  "version": "2.39.2",
-  "description": "Alibaba Cloud Log Service (SLS) data source for Grafana",
+  "name": "nethinwei-sls-datasource",
+  "version": "0.1.0",
+  "description": "Community Grafana data source for Alibaba Cloud Log Service (SLS)",
   "scripts": {
     "build": "webpack -c ./.config/webpack/webpack.config.ts --env production",
     "dev": "webpack -w -c ./.config/webpack/webpack.config.ts --env development",
@@ -11,8 +11,9 @@
     "lint": "eslint --cache .",
     "lint:fix": "npm run lint -- --fix && prettier --write --list-different ."
   },
-  "author": "aliyun-log",
-  "license": "Apache-2.0",
+  "author": "nethinwei",
+  "license": "MIT",
+  "repository": "github:nethinwei/sls-grafana-datasource",
   "devDependencies": {
     "@grafana/eslint-config": "^10.0.0",
     "@grafana/tsconfig": "^2.2.0",

@@ -73,7 +73,7 @@ func TestBuildSQLFrameTable(t *testing.T) {
 		{"service": "topup", "c": "10", "ratio": "0.5", "ok": "true"},
 		{"service": "cashier", "c": "9", "ratio": "null", "ok": "false"},
 	}
-	f, err := buildSQLFrame([]string{"service", "c", "ratio", "ok"}, nil, rows, "time", time.UTC)
+	f, err := buildSQLFrame([]string{"service", "c", "ratio", "ok"}, nil, rows, "time", time.UTC, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func TestBuildSQLFrameTable(t *testing.T) {
 
 func TestBuildSQLFrameColumnTypesWin(t *testing.T) {
 	rows := []map[string]string{{"code": "200"}, {"code": "404"}}
-	f, err := buildSQLFrame([]string{"code"}, []string{"varchar"}, rows, "time", time.UTC)
+	f, err := buildSQLFrame([]string{"code"}, []string{"varchar"}, rows, "time", time.UTC, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +113,7 @@ func TestBuildSQLFrameLongToWide(t *testing.T) {
 		{"time": "1700000000", "service": "cashier", "c": "2"},
 		{"time": "1700000060", "service": "cashier", "c": "4"},
 	}
-	f, err := buildSQLFrame([]string{"time", "service", "c"}, []string{"bigint", "varchar", "bigint"}, rows, "time", time.UTC)
+	f, err := buildSQLFrame([]string{"time", "service", "c"}, []string{"bigint", "varchar", "bigint"}, rows, "time", time.UTC, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +138,7 @@ func TestBuildSQLFrameLongToWide(t *testing.T) {
 
 func TestBuildSQLFrameTimeSeriesWithoutStrings(t *testing.T) {
 	rows := []map[string]string{{"t": "1700000060", "c": "2"}, {"t": "1700000000", "c": "1"}}
-	f, err := buildSQLFrame([]string{"t", "c"}, nil, rows, "t", time.UTC)
+	f, err := buildSQLFrame([]string{"t", "c"}, nil, rows, "t", time.UTC, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

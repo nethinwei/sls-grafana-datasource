@@ -1,4 +1,4 @@
-module github.com/grafana/grafana-starter-datasource-backend
+module github.com/nethinwei/sls-grafana-datasource
 
 go 1.26.5
 

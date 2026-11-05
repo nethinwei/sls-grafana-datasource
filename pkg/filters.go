@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -38,7 +39,7 @@ func applyAdhocFilters(query string, filters []adhocFilter, view *logsView, cat 
 			continue
 		}
 		if target.indexed {
-			if c := searchCondition(target.name, f); c != "" {
+			if c := searchCondition(target.name, target.typ, f); c != "" {
 				search = append(search, c)
 				continue
 			}
@@ -70,6 +71,7 @@ type filterField struct {
 	name    string // SLS field for search; empty for flattened JSON fields
 	expr    string // SPL expression for where: the quoted field, or json_extract_scalar(...)
 	indexed bool   // search works
+	typ     string // index type (text, long, double, json), "" when unknown
 }
 
 // learnedFields reports what recent query results said about a field the catalog does not know:
@@ -77,17 +79,31 @@ type filterField struct {
 type learnedFields func(name string) (expr string, known bool)
 
 // filterTarget returns how SLS reaches a field shown in Grafana; ok is false for fields that exist
-// only in Grafana. The catalog comes first (index and sample); then what recent results produced
-// (flattened JSON keys outside the sample); then the rules' renames, with fields assumed indexed.
+// only in Grafana. Flattened JSON fields seen in results come first (their expression reads both
+// storages); then the catalog (index and sample); then what results said about fields the rules
+// produced; then the rules' renames, with fields assumed indexed.
 func filterTarget(key string, view *logsView, cat *catalog, learned learnedFields) (filterField, bool) {
+	if key == "detected_level" { // Grafana's name for the level of a log row
+		key = view.levelField
+	}
 	field := func(name string, indexed bool) (filterField, bool) {
 		return filterField{name: name, expr: quoteIdentifier(name), indexed: indexed}, true
+	}
+	// A field that results produced by flattening JSON may also be a real field of other logs of the
+	// logstore (order_id at the top level in some services, inside order in others): its
+	// expression, coalesce("order_id", json_extract_scalar("order", ...)), matches both.
+	if learned != nil {
+		if expr, known := learned(key); known && expr != "" {
+			return filterField{expr: expr}, true
+		}
 	}
 	if cat != nil {
 		if cf, found := cat.byName(key); found {
 			switch {
 			case cf.SLSName != "":
-				return field(cf.SLSName, cf.Indexed == nil || *cf.Indexed)
+				ff, ok := field(cf.SLSName, cf.Indexed == nil || *cf.Indexed)
+				ff.typ = cf.Type
+				return ff, ok
 			case cf.Expr != "":
 				return filterField{expr: cf.Expr}, true
 			}
@@ -120,7 +136,18 @@ func filterValues(f adhocFilter) []string {
 }
 
 // searchCondition expresses a filter in SLS search syntax; "" when it cannot.
-func searchCondition(key string, f adhocFilter) string {
+var plainSearchKey = regexp.MustCompile(`^[\w.@:-]+$`)
+
+// searchKey writes a field name for SLS search, quoting names with other characters (spaces, ...).
+func searchKey(key string) string {
+	if plainSearchKey.MatchString(key) {
+		return key
+	}
+	return quoteSearchValue(key)
+}
+
+func searchCondition(key, typ string, f adhocFilter) string {
+	key = searchKey(key)
 	eq := func(v string) string { return key + ": " + quoteSearchValue(v) }
 	switch f.Operator {
 	case "=":
@@ -140,20 +167,15 @@ func searchCondition(key string, f adhocFilter) string {
 			return parts[0]
 		}
 		return "(" + strings.Join(parts, " or ") + ")"
-	case "=~", "!~":
-		w := regexToWildcard(f.Value)
-		if w == "" {
-			return "" // a where clause with regexp_like takes over
-		}
-		if f.Operator == "!~" {
-			return "not " + key + ": " + w
-		}
-		return key + ": " + w
 	case "<", ">", "<=", ">=":
-		if _, err := strconv.ParseFloat(f.Value, 64); err == nil {
+		// Range search only works on long and double indexes; on text it would turn into a full-text
+		// search for the number. Unknown types (no index information) are assumed numeric.
+		if finite(f.Value) && (typ == "" || typ == "long" || typ == "double") {
 			return key + " " + f.Operator + " " + f.Value
 		}
 	}
+	// Regexes are not translated to search wildcards: fuzzy search samples at most 100 terms and does
+	// not work on long and double fields. A where clause with regexp_like takes over.
 	return ""
 }
 
@@ -191,27 +213,15 @@ func whereCondition(col string, f adhocFilter) string {
 		}
 		return cond
 	case "<", ">", "<=", ">=":
-		if _, err := strconv.ParseFloat(f.Value, 64); err == nil {
+		if finite(f.Value) {
 			return "cast(" + col + " as double) " + f.Operator + " " + f.Value
 		}
 	}
 	return ""
 }
 
-var wildcardSafe = regexp.MustCompile(`^[\w\-/:@*?]+$`)
-
-// regexToWildcard converts a simple regex (^pay.*, timeout$, a.c) to an SLS search wildcard, which
-// cannot start with * or ?; "" when the regex is not that simple.
-func regexToWildcard(re string) string {
-	body := strings.TrimSuffix(strings.TrimPrefix(re, "^"), "$")
-	w := strings.ReplaceAll(strings.ReplaceAll(body, ".*", "*"), ".", "?")
-	if !wildcardSafe.MatchString(w) || strings.HasPrefix(w, "*") || strings.HasPrefix(w, "?") {
-		return ""
-	}
-	return w
-}
-
-// splitStatement splits "search | rest" at the first pipe outside quotes.
+// splitStatement splits "search | rest" at the first pipe outside quotes. Only double quotes quote
+// in SLS search; a single quote is an ordinary character there (msg: it's).
 func splitStatement(q string) (search, rest string) {
 	var quote byte
 	for i := 0; i < len(q); i++ {
@@ -223,7 +233,7 @@ func splitStatement(q string) (search, rest string) {
 			} else if c == quote {
 				quote = 0
 			}
-		case c == '"' || c == '\'':
+		case c == '"':
 			quote = c
 		case c == '|':
 			return strings.TrimSpace(q[:i]), q[i:]
@@ -262,7 +272,7 @@ func hasTopLevelOr(s string) bool {
 			} else if c == quote {
 				quote = 0
 			}
-		case c == '"' || c == '\'':
+		case c == '"':
 			quote = c
 		case c == '(':
 			depth++
@@ -276,3 +286,9 @@ func hasTopLevelOr(s string) bool {
 }
 
 func isSpace(c byte) bool { return c == ' ' || c == '\t' || c == '\n' }
+
+// finite reports whether v is a finite number (ParseFloat also accepts Inf and NaN).
+func finite(v string) bool {
+	f, err := strconv.ParseFloat(v, 64)
+	return err == nil && !math.IsInf(f, 0) && !math.IsNaN(f)
+}

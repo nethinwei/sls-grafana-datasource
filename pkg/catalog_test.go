@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	sls "github.com/aliyun/aliyun-log-go-sdk"
+	"github.com/grafana/grafana-plugin-sdk-go/data"
 )
 
 var otelTestRules = append(append([]fieldRule{}, defaultFieldRules...),
@@ -94,7 +95,8 @@ func TestApplyAdhocFilters(t *testing.T) {
 			`(level: ERROR or level: WARN) and not level: "a\"b" | select count(*)`, 0},
 		{"one of", "*", []adhocFilter{{Key: "level", Operator: "=|", Values: []string{"a", "b"}}},
 			`(level: "a" or level: "b")`, 0},
-		{"wildcard regex", "*", []adhocFilter{{Key: "level", Operator: "=~", Value: "^ERR.*"}}, `level: ERR*`, 0},
+		{"regexes use regexp_like", "*", []adhocFilter{{Key: "level", Operator: "=~", Value: "5.."}}, `* | where regexp_like("level", '^(?:5..)$')`, 0},
+		{"regexes cannot filter SQL", "* | select 1", []adhocFilter{{Key: "level", Operator: "=~", Value: "E.*"}}, "* | select 1", 1},
 		{"complex regex falls back to where", "*", []adhocFilter{{Key: "level", Operator: "=~", Value: "(a|b)"}},
 			`* | where regexp_like("level", '^(?:(a|b))$')`, 0},
 		{"no index uses where", "x", []adhocFilter{{Key: "msg", Operator: "=", Value: "it's"}, {Key: "level", Operator: ">", Value: "3"}},
@@ -185,16 +187,55 @@ func TestFlattenedFieldFilters(t *testing.T) {
 		t.Errorf("exprs = %v", exprs)
 	}
 	ds := &datasource{}
-	ds.learnFields(f)
+	ds.learnFields("ls", f)
 	// Flattened fields the catalog's sample missed are filtered with SPL, like Loki's | json | k="v";
 	// fields produced by other rules are skipped.
 	q, skipped := applyAdhocFilters("level: ERROR", []adhocFilter{
 		{Key: "http_method", Operator: "=", Value: "POST"},
 		{Key: "http_client_ip", Operator: "!=", Value: "1.1.1.1"},
 		{Key: "word", Operator: "=", Value: "a"},
-	}, view, &catalog{}, ds.learnedField)
+	}, view, &catalog{}, ds.learnedFields("ls"))
 	want := `level: ERROR | where coalesce("http_method", json_extract_scalar("http", '$["method"]')) = 'POST' and coalesce(coalesce("http_client_ip", json_extract_scalar("http", '$["client"]["ip"]')), '') != '1.1.1.1'`
 	if q != want || len(skipped) != 1 {
 		t.Errorf("got  %s %v\nwant %s", q, skipped, want)
+	}
+}
+
+func TestDottedTopLevelFieldsStay(t *testing.T) {
+	index := &sls.Index{Keys: map[string]sls.IndexKey{"service.name": {Type: "text", DocValue: true}}}
+	sample := []map[string]string{{"service.name": "pay", "msg": "a"}}
+	c := buildCatalog(index, sample, testView(nil, nil, true))
+	if f, ok := c.byName("service.name"); !ok || f.SLSName != "service.name" || f.Rule != "" {
+		t.Errorf("service.name = %+v", f)
+	}
+	if _, ok := c.byName("service_name"); ok {
+		t.Error("a top-level dotted field is not a JSON key")
+	}
+	q, skipped := applyAdhocFilters("*", []adhocFilter{{Key: "service.name", Operator: "=", Value: "pay"}}, testView(nil, nil, true), c, nil)
+	if q != `service.name: "pay"` || len(skipped) != 0 {
+		t.Errorf("%q %v", q, skipped)
+	}
+}
+
+func TestRangeOnTextUsesWhere(t *testing.T) {
+	yes := true
+	cat := &catalog{Fields: []catalogField{{Name: "status", Type: "text", Indexed: &yes, SLSName: "status"}, {Name: "cost", Type: "long", Indexed: &yes, SLSName: "cost"}}}
+	q, _ := applyAdhocFilters("*", []adhocFilter{{Key: "status", Operator: ">", Value: "499"}, {Key: "cost", Operator: ">", Value: "10"}}, testView(nil, nil, true), cat, nil)
+	if q != `cost > 10 | where cast("status" as double) > 499` {
+		t.Errorf("q = %q", q)
+	}
+}
+
+func TestFlattenedNameThatIsAlsoARealField(t *testing.T) {
+	yes := true
+	cat := &catalog{Fields: []catalogField{{Name: "order_id", Type: "text", Indexed: &yes, SLSName: "order_id"}}}
+	ds := &datasource{}
+	f := data.NewFrame("logs")
+	expr := `coalesce("order_id", json_extract_scalar("order", '$["id"]'))`
+	f.Meta = &data.FrameMeta{Custom: map[string]any{fieldExprsKey: map[string]string{"order_id": expr}}}
+	ds.learnFields("ls", f)
+	q, _ := applyAdhocFilters("*", []adhocFilter{{Key: "order_id", Operator: "=", Value: "TP1"}}, testView(nil, nil, true), cat, ds.learnedFields("ls"))
+	if q != "* | where "+expr+" = 'TP1'" {
+		t.Errorf("q = %q", q)
 	}
 }

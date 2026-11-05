@@ -13,43 +13,23 @@ import {
 import React, { useEffect, useState } from 'react';
 
 import type { SLSDataSource } from '../datasource';
-import { type Catalog, DEFAULT_MAX_LINES, MAX_MAX_LINES, type SLSDataSourceOptions, type SLSQuery } from '../types';
+import {
+  type Catalog,
+  DEFAULT_MAX_LINES,
+  MAX_MAX_LINES,
+  type QueryFormat,
+  type SLSDataSourceOptions,
+  type SLSQuery,
+} from '../types';
 import { FieldBrowser } from './FieldBrowser';
 import { SLSQueryField } from './SLSQueryField';
 
 type Props = QueryEditorProps<SLSDataSource, SLSQuery, SLSDataSourceOptions>;
 
-// Fields of plugin 2.x queries that the backend no longer uses; dropped on the first edit.
-const LEGACY_FIELDS = [
-  'xcol',
-  'ycol',
-  'logsPerPage',
-  'currentPage',
-  'totalLogs',
-  'type',
-  'legendFormat',
-  'step',
-  'queryType',
+const FORMATS: Array<ComboboxOption<QueryFormat>> = [
+  { value: 'time_series', label: 'Time series', description: 'Results with the time column become time series' },
+  { value: 'table', label: 'Table', description: 'The SQL result as it is' },
 ];
-
-function clean(query: SLSQuery): SLSQuery {
-  const q: Record<string, unknown> = { ...query };
-  // xcol naming a column was the time column; keep that meaning.
-  const xcol = q.xcol;
-  if (
-    !q.timeColumn &&
-    typeof xcol === 'string' &&
-    xcol &&
-    !['table', 'bar', 'pie', 'map', 'stat', 'trace'].includes(xcol)
-  ) {
-    q.timeColumn = xcol;
-  }
-  if (!q.maxLines && typeof q.totalLogs === 'number') {
-    q.maxLines = q.totalLogs;
-  }
-  LEGACY_FIELDS.forEach((f) => delete q[f]);
-  return q as unknown as SLSQuery;
-}
 
 export function QueryEditor({ datasource, query, onChange, onRunQuery, range }: Props) {
   const [logstores, setLogstores] = useState<string[]>([]);
@@ -65,7 +45,14 @@ export function QueryEditor({ datasource, query, onChange, onRunQuery, range }: 
   const [browsing, setBrowsing] = useState(false);
   const catalogLogstore = query.logstore?.startsWith('$') ? undefined : query.logstore || undefined;
   useEffect(() => {
-    datasource.getCatalog(catalogLogstore).then(setCatalog, () => setCatalog(undefined));
+    let current = true; // a slower answer for a previous logstore must not overwrite this one
+    datasource.getCatalog(catalogLogstore).then(
+      (c) => current && setCatalog(c),
+      () => current && setCatalog(undefined)
+    );
+    return () => {
+      current = false;
+    };
   }, [datasource, catalogLogstore]);
   const refreshCatalog = () => {
     setCatalogLoading(true);
@@ -76,7 +63,7 @@ export function QueryEditor({ datasource, query, onChange, onRunQuery, range }: 
   };
 
   const update = (patch: Partial<SLSQuery>, run = false) => {
-    onChange({ ...clean(query), ...patch });
+    onChange({ ...query, ...patch });
     if (run) {
       onRunQuery();
     }
@@ -89,17 +76,24 @@ export function QueryEditor({ datasource, query, onChange, onRunQuery, range }: 
     ...logstores.map((l) => ({ label: l, value: l })),
     ...variableOptions,
   ];
-  const logstore = query.logstore?.replace(/^__custom__@/, '$') ?? '';
-  const cleaned = clean(query);
+  const logstore = query.logstore ?? '';
+  const format = query.format ?? 'time_series';
 
   const openConsole = async () => {
     setConsoleError(undefined);
     if (!range) {
       return;
     }
+    // Open the window within the click: browsers block windows opened after an await.
+    const win = window.open('', '_blank');
     try {
-      window.open(await datasource.getConsoleUrl(query, range), '_blank', 'noopener');
+      const url = await datasource.getConsoleUrl(query, range);
+      if (win) {
+        win.opener = null;
+        win.location.href = url;
+      }
     } catch (e) {
+      win?.close();
       setConsoleError(e instanceof Error ? e.message : String(e));
     }
   };
@@ -169,24 +163,42 @@ export function QueryEditor({ datasource, query, onChange, onRunQuery, range }: 
             min={1}
             max={MAX_MAX_LINES}
             placeholder={String(DEFAULT_MAX_LINES)}
-            defaultValue={cleaned.maxLines}
-            onBlur={(e) =>
-              update({ maxLines: e.currentTarget.value ? Number(e.currentTarget.value) : undefined }, true)
-            }
+            defaultValue={query.maxLines}
+            onBlur={(e) => {
+              const maxLines = e.currentTarget.value ? Number(e.currentTarget.value) : undefined;
+              if (maxLines !== query.maxLines) {
+                update({ maxLines }, true);
+              }
+            }}
           />
         </InlineField>
-        <InlineField
-          label="Time column"
-          labelWidth={16}
-          tooltip="SQL column holding the time. With a time column the result becomes time series, one per combination of string columns."
-        >
-          <Input
-            width={14}
-            placeholder="time"
-            defaultValue={cleaned.timeColumn}
-            onBlur={(e) => update({ timeColumn: e.currentTarget.value || undefined }, true)}
+        <InlineField label="Format" tooltip="How SQL results are returned. Search and SPL always return logs.">
+          <Combobox<QueryFormat>
+            width={16}
+            options={FORMATS}
+            value={format}
+            onChange={(o) => update({ format: o.value === 'time_series' ? undefined : o.value }, true)}
           />
         </InlineField>
+        {format === 'time_series' && (
+          <InlineField
+            label="Time column"
+            labelWidth={16}
+            tooltip="SQL column holding the time. With a time column the result becomes time series, one per combination of string columns."
+          >
+            <Input
+              width={14}
+              placeholder="time"
+              defaultValue={query.timeColumn}
+              onBlur={(e) => {
+                const timeColumn = e.currentTarget.value || undefined;
+                if (timeColumn !== query.timeColumn) {
+                  update({ timeColumn }, true);
+                }
+              }}
+            />
+          </InlineField>
+        )}
         <InlineField
           label="Dedicated SQL"
           tooltip="Run SQL on the SLS Dedicated SQL engine (more resources, billed separately)."

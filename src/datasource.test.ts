@@ -12,7 +12,7 @@ jest.mock('@grafana/runtime', () => ({
 const settings = {
   id: 1,
   uid: 'sls',
-  type: 'aliyun-log-service-datasource',
+  type: 'nethinwei-sls-datasource',
   name: 'SLS',
   jsonData: { project: 'p', logstore: 'default-ls' },
   meta: {} as never,
@@ -44,15 +44,13 @@ describe('SLSDataSource', () => {
 
 describe('toVariableQuery', () => {
   it.each([
-    ['* | select a from log', { refId: 'variable', query: '* | select a from log' }],
-    [{ __legacyStringValue: '* | select b from log' }, { refId: 'variable', query: '* | select b from log' }],
     [
       { refId: 'X', query: 'q', logstore: 'ls' },
-      { refId: 'X', query: 'q', logstore: 'ls' },
+      { refId: 'X', query: 'q', logstore: 'ls', format: 'table' },
     ],
-    [undefined, { refId: 'variable' }],
+    [undefined, { refId: 'variable', format: 'table' }],
   ])('%j', (stored, want) => {
-    expect(toVariableQuery(stored as never)).toEqual(want);
+    expect(toVariableQuery(stored)).toEqual(want);
   });
 });
 
@@ -64,14 +62,13 @@ describe('log features', () => {
 
   it('filters on fields from Explore, mapping detected_level to the level field', () => {
     const q = { refId: 'A', query: 'service: api' };
+    // Before any result describes the fields: tried as indexed SLS fields.
     expect(
       ds.toggleQueryFilter(q, { type: 'FILTER_FOR', options: { key: 'detected_level', value: 'ERROR' } }).query
     ).toBe('service: api and severity: "ERROR"');
     expect(ds.toggleQueryFilter(q, { type: 'FILTER_OUT', options: { key: 'channel', value: 'x' } }).query).toBe(
       'service: api and not channel: "x"'
     );
-    // Fields added by the plugin are not SLS fields.
-    expect(ds.toggleQueryFilter(q, { type: 'FILTER_FOR', options: { key: 'message', value: 'x' } })).toBe(q);
     expect(
       ds.queryHasFilter({ refId: 'A', query: 'severity: "ERROR"' }, { key: 'detected_level', value: 'ERROR' })
     ).toBe(true);
@@ -96,6 +93,8 @@ describe('log features', () => {
     const q = ds.applyTemplateVariables({ refId: 'A', query: '* | select count(*) as c' }, {}, filters);
     expect(q.query).toBe('* | select count(*) as c');
     expect(q.adhocFilters).toEqual(filters);
+    // Filters carried over in the query (e.g. into Explore) do not survive a request without them.
+    expect(ds.applyTemplateVariables({ ...q }, {}).adhocFilters).toBeUndefined();
   });
 });
 
@@ -117,52 +116,6 @@ describe('field catalog', () => {
     await ds.getCatalog();
     return { ds, post };
   }
-  const q = { refId: 'A', query: 'service: api' };
-  const toggle = (ds: SLSDataSource, key: string, value: string) =>
-    ds.toggleQueryFilter(q, { type: 'FILTER_FOR', options: { key, value } }).query;
-
-  it('filters renamed fields under their SLS name and skips Grafana-only fields', async () => {
-    const { ds } = await loaded();
-    expect(toggle(ds, 'host.name', 'web-1')).toBe('service: api and __tag__:__hostname__: "web-1"');
-    expect(
-      ds.queryHasFilter({ refId: 'A', query: '__tag__:__hostname__: "web-1"' }, { key: 'host.name', value: 'web-1' })
-    ).toBe(true);
-    expect(toggle(ds, 'service.name', 'pay')).toBe('service: api');
-  });
-
-  it('filters flattened JSON fields with SPL and skips Grafana-only fields', async () => {
-    const { ds } = await loaded();
-    const frame = {
-      fields: [],
-      length: 0,
-      meta: {
-        custom: {
-          grafanaOnlyFields: ['word'],
-          fieldExprs: { http_method: `json_extract_scalar("http", '$["method"]')` },
-        },
-      },
-    };
-    const toggleIn = (key: string, value: string) =>
-      ds.toggleQueryFilter(q, { type: 'FILTER_FOR', options: { key, value }, frame }).query;
-    expect(toggleIn('http_method', 'POST')).toBe(
-      `service: api | where json_extract_scalar("http", '$["method"]') = 'POST'`
-    );
-    expect(toggleIn('word', 'a')).toBe('service: api');
-    // Remembered from the result: Grafana does not always pass the frame.
-    expect(ds.toggleQueryFilter(q, { type: 'FILTER_OUT', options: { key: 'http_method', value: 'GET' } }).query).toBe(
-      `service: api | where coalesce(json_extract_scalar("http", '$["method"]'), '') != 'GET'`
-    );
-    expect(
-      ds.queryHasFilter({ refId: 'A', query: toggleIn('http_method', 'POST') }, { key: 'http_method', value: 'POST' })
-    ).toBe(true);
-  });
-
-  it('uses SPL where for fields without an index', async () => {
-    const { ds } = await loaded();
-    expect(toggle(ds, 'level', 'ERROR')).toBe('service: api and level: "ERROR"');
-    expect(toggle(ds, 'http_status', '200')).toBe(`service: api | where "http_status" = '200'`);
-    expect(toggle(ds, '__tag__:__path__', '/a.log')).toBe('service: api and __tag__:__path__: "/a.log"');
-  });
 
   it('offers filterable fields as ad hoc keys and caches the catalog', async () => {
     const { ds, post } = await loaded();
@@ -170,5 +123,63 @@ describe('field catalog', () => {
     expect(post).toHaveBeenCalledTimes(1);
     await ds.getCatalog(undefined, true);
     expect(post).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('filters described by the backend', () => {
+  // As the backend describes the fields of a logs frame (describeFilters in pkg/datasource.go).
+  const frame = {
+    fields: [],
+    length: 0,
+    meta: {
+      custom: {
+        logstore: 'default-ls',
+        filterFields: {
+          message: null,
+          'service.name': null,
+          'host.name': { key: '__tag__:__hostname__', expr: '"__tag__:__hostname__"', search: true },
+          http_status: { key: 'http_status', expr: '"http_status"', search: false },
+          http_method: { expr: `coalesce("http_method", json_extract_scalar("http", '$["method"]'))`, search: false },
+        },
+      },
+    },
+  };
+  const q = { refId: 'A', query: 'service: api' };
+
+  it('writes the conditions the backend describes', () => {
+    const ds = new SLSDataSource(settings, passthrough);
+    const toggle = (key: string, value: string, type: 'FILTER_FOR' | 'FILTER_OUT' = 'FILTER_FOR') =>
+      ds.toggleQueryFilter(q, { type, options: { key, value }, frame }).query;
+    expect(toggle('host.name', 'web-1')).toBe('service: api and __tag__:__hostname__: "web-1"');
+    expect(toggle('http_status', '200')).toBe(`service: api | where "http_status" = '200'`);
+    expect(toggle('http_method', 'GET', 'FILTER_OUT')).toBe(
+      `service: api | where coalesce(coalesce("http_method", json_extract_scalar("http", '$["method"]')), '') != 'GET'`
+    );
+    expect(toggle('service.name', 'pay')).toBe('service: api');
+    expect(toggle('message', 'x')).toBe('service: api');
+  });
+
+  it('remembers descriptions from query results', () => {
+    const ds = new SLSDataSource(settings, passthrough);
+    (ds as unknown as { learnFields: (f: unknown) => void }).learnFields(frame);
+    // Grafana does not always pass the frame with ➕ / ➖.
+    expect(ds.toggleQueryFilter(q, { type: 'FILTER_FOR', options: { key: 'host.name', value: 'web-1' } }).query).toBe(
+      'service: api and __tag__:__hostname__: "web-1"'
+    );
+    expect(
+      ds.queryHasFilter({ refId: 'A', query: '__tag__:__hostname__: "web-1"' }, { key: 'host.name', value: 'web-1' })
+    ).toBe(true);
+  });
+});
+
+describe('catalog requests', () => {
+  it('uses the logstore of the dashboard queries and does not keep empty catalogs', async () => {
+    const ds = new SLSDataSource(settings, passthrough);
+    const post = jest.fn().mockResolvedValue({ fields: [], indexKnown: false });
+    ds.postResource = post as never;
+    await ds.getTagKeys({ queries: [{ refId: 'A', logstore: 'other' }], filters: [] } as never);
+    expect(post).toHaveBeenLastCalledWith('api/catalog', { logstore: 'other', refresh: false });
+    await ds.getTagKeys({ queries: [{ refId: 'A', logstore: 'other' }], filters: [] } as never);
+    expect(post).toHaveBeenCalledTimes(2); // an empty catalog is asked again
   });
 });

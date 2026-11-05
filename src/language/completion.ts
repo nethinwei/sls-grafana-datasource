@@ -114,9 +114,11 @@ export function getCompletionProvider(monaco: typeof monacoTypes): monacoTypes.l
     triggerCharacters: ['$'],
     provideCompletionItems(model, position) {
       const word = model.getWordUntilPosition(position);
-      // Include a leading "$" so macros replace what was typed.
-      const before = model.getLineContent(position.lineNumber).slice(0, word.startColumn - 1);
-      const startColumn = before.endsWith('$') ? word.startColumn - 1 : word.startColumn;
+      // Replace the whole token typed so far: field names contain ":" and "." (__tag__:__path__,
+      // host.name) and macros start with "$".
+      const before = model.getLineContent(position.lineNumber).slice(0, position.column - 1);
+      const token = /[\w.:@$-]*$/.exec(before)?.[0] ?? '';
+      const startColumn = position.column - token.length;
       const range = new monaco.Range(position.lineNumber, startColumn, position.lineNumber, word.endColumn);
       const textBefore = model.getValueInRange(new monaco.Range(1, 1, position.lineNumber, position.column));
       const inPipe = splitStatement(textBefore).rest !== '';

@@ -25,6 +25,11 @@ export function ConfigEditor({ options, onOptionsChange }: Props) {
     const line = { ...logs.line, ...patch };
     setLogs({ line: line.fields?.length || line.exclude?.length || line.rest === false ? line : undefined });
   };
+  const setLimit = (key: 'maxWideCells' | 'maxFlattenedFields', value: string) => {
+    const n = Number(value);
+    const limits = { ...jsonData.limits, [key]: value && n > 0 ? Math.floor(n) : undefined };
+    setJson({ limits: Object.values(limits).some((v) => v !== undefined) ? limits : undefined });
+  };
   const setSecret = (key: keyof SLSSecureJsonData, value: string) =>
     onOptionsChange({ ...options, secureJsonData: { ...secure, [key]: value } });
   const resetSecret = (key: keyof SLSSecureJsonData) =>
@@ -121,6 +126,33 @@ export function ConfigEditor({ options, onOptionsChange }: Props) {
         <Switch
           value={Boolean(jsonData.international)}
           onChange={(e) => setJson({ international: e.currentTarget.checked })}
+        />
+      </Field>
+
+      <Field
+        label="Max wide-table cells"
+        description="Bound for an SQL result turned into time series: distinct times × combinations of string columns × number columns. Larger results return an error instead of exhausting the plugin's memory."
+      >
+        <Input
+          type="number"
+          width={20}
+          min={1}
+          placeholder="6000000"
+          value={jsonData.limits?.maxWideCells ?? ''}
+          onChange={(e) => setLimit('maxWideCells', e.currentTarget.value)}
+        />
+      </Field>
+      <Field
+        label="Max flattened fields"
+        description="Distinct fields the json rule creates per query result. Objects keyed by IDs would otherwise add a field per key; past the bound their JSON stays in the line."
+      >
+        <Input
+          type="number"
+          width={20}
+          min={1}
+          placeholder="200"
+          value={jsonData.limits?.maxFlattenedFields ?? ''}
+          onChange={(e) => setLimit('maxFlattenedFields', e.currentTarget.value)}
         />
       </Field>
 

@@ -1,10 +1,10 @@
 name: Release
 
-# Pushing a tag such as 2.39.2-fork.1 builds the frontend and every backend binary from source and
+# Pushing a tag such as v0.1.0 builds the frontend and every backend binary from source and
 # publishes a GitHub Release with the installable ZIP and its SHA256.
 on:
   push:
-    tags: ['*-fork.*']
+    tags: ['v*']
 
 permissions:
   contents: read
@@ -34,7 +34,7 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           pkg=$(jq -r .version package.json)
-          if [ "$pkg" != "$TAG" ]; then
+          if [ "v$pkg" != "$TAG" ]; then
             echo "tag=$TAG package.json=$pkg must match"; exit 1
           fi
 
@@ -50,20 +50,25 @@ jobs:
           go test ./pkg/
           make all
 
+      - name: Add notices and the licenses of Go dependencies
+        run: |
+          cp NOTICE dist/
+          scripts/collect-go-licenses.sh dist/licenses
+
       - name: Check the built plugin
         env:
           TAG: ${{ github.ref_name }}
         run: |
-          test "$(jq -r .info.version dist/plugin.json)" = "$TAG"
-          test "$(jq -r .id dist/plugin.json)" = aliyun-log-service-datasource
-          ls dist/module.js dist/gpx_log-service-datasource_linux_amd64 dist/gpx_log-service-datasource_linux_arm64
+          test "v$(jq -r .info.version dist/plugin.json)" = "$TAG"
+          test "$(jq -r .id dist/plugin.json)" = nethinwei-sls-datasource
+          ls dist/module.js dist/gpx_sls-datasource_linux_amd64 dist/gpx_sls-datasource_linux_arm64
 
       - name: Package
         id: package
         env:
           TAG: ${{ github.ref_name }}
         run: |
-          id=aliyun-log-service-datasource
+          id=nethinwei-sls-datasource
           stage="$RUNNER_TEMP/stage"
           mkdir -p "$stage"
           cp -R dist "$stage/$id"

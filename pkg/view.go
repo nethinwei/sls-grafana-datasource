@@ -23,6 +23,8 @@ type logsView struct {
 	lineFields  []string
 	lineRest    bool
 	lineExclude map[string]bool
+	// maxFlattened bounds the fields the json rule creates per result (0: no limit).
+	maxFlattened int
 }
 
 func compileLogsView(cfg logsConfig) logsView {
@@ -68,11 +70,19 @@ func compileLogsView(cfg logsConfig) logsView {
 	return v
 }
 
+// slsName is the SLS field behind a field shown in Grafana (itself unless renamed).
+func (v *logsView) slsName(name string) string {
+	if sls, ok := v.slsNames[name]; ok {
+		return sls
+	}
+	return name
+}
+
 // table runs the rules on logs and returns the resulting columns and the run's context (row times
 // written by a time rule, fields flattened by a json rule).
 func (v *logsView) table(logs []map[string]string) (*table, *applyContext) {
 	t := newTable(logs)
-	ctx := &applyContext{timeField: v.timeField}
+	ctx := &applyContext{timeField: v.timeField, maxFlattened: v.maxFlattened}
 	for _, r := range v.rules {
 		r.apply(t, ctx)
 	}

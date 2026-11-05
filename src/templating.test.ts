@@ -42,8 +42,6 @@ describe('interpolateQuery', () => {
   const srv = fakeTemplateSrv([
     { name: 'service_name', multi: true, includeAll: true, current: ['topup', 'cashier'] },
     { name: 'one', multi: true, current: ['only'] },
-    { name: 'level', label: 'level', multi: true, current: ['ERROR', 'WARN'] },
-    { name: 'legacy', description: 'x field_search', multi: true, current: ['a', 'b'] },
     { name: 'plain', multi: true, current: ['a', 'b'] },
     { name: 'single', current: 'checkout' },
     { name: 'all', includeAll: true, current: '*' },
@@ -59,9 +57,7 @@ describe('interpolateQuery', () => {
     ['__tag__:__path__: $one', '__tag__:__path__: "only"'],
     ['service_name: $all', 'service_name: *'],
     ['msg: $quoted', '(msg: "say \\"hi\\"" or msg: "x")'],
-    // Not "key: $var": legacy 2.x formatting.
-    ['($legacy)', '("legacy":"a" OR "legacy":"b")'],
-    ['($level)', '("level":"ERROR" OR "level":"WARN")'],
+    // Not "key: $var": values joined with OR.
     ['($plain)', '(a OR b)'],
     // Single-value variables are replaced as they are.
     ['channel: $single', 'channel: checkout'],
@@ -86,7 +82,6 @@ describe('interpolateLogstore', () => {
     [undefined, ''],
     ['plain', 'plain'],
     ['$ls', 'app-logs'],
-    ['__custom__@ls', 'app-logs'],
   ])('%s', (input, want) => {
     expect(interpolateLogstore(input, {}, srv)).toBe(want);
   });

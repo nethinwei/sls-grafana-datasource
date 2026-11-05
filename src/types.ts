@@ -3,10 +3,7 @@ import type { DataQuery } from '@grafana/schema';
 
 /**
  * One SLS query. A search statement (`level: ERROR`) or SPL returns log rows; a statement with SQL
- * (`* | select ...`) returns a typed table, or time series when it has a time column.
- *
- * Fields from plugin 2.x (xcol, ycol, logsPerPage, totalLogs, ...) may still be present in saved
- * dashboards. The backend reads the ones that still make sense; the editor drops the rest on change.
+ * (`* | select ...`) returns a typed table, or time series (see format).
  */
 export interface SLSQuery extends DataQuery {
   query?: string;
@@ -18,12 +15,19 @@ export interface SLSQuery extends DataQuery {
   timeColumn?: string;
   /** Run SQL on the Dedicated SQL engine. */
   powerSql?: boolean;
+  /**
+   * SQL results: time series (default) when the result has the time column, one series per
+   * combination of string columns; or the table as it is.
+   */
+  format?: QueryFormat;
   /** Special queries built by the plugin itself; never set by the query editor. */
   queryType?: typeof QUERY_TYPE_LOGS_VOLUME | typeof QUERY_TYPE_LOGS_CONTEXT;
   context?: LogsContextParams;
   /** Dashboard ad hoc filters, translated by the backend with the field catalog. */
   adhocFilters?: AdHocVariableFilter[];
 }
+
+export type QueryFormat = 'time_series' | 'table';
 
 export const QUERY_TYPE_LOGS_VOLUME = 'logsVolume';
 export const QUERY_TYPE_LOGS_CONTEXT = 'logsContext';
@@ -50,6 +54,13 @@ export interface SLSDataSourceOptions extends DataSourceJsonData {
   sqlTimeZone?: string;
   /** How log rows are processed and presented. */
   logs?: LogsConfig;
+  /** Memory bounds of one query result; absent values use the defaults. */
+  limits?: {
+    /** Cells of an SQL result turned into wide time series. Default 6000000. */
+    maxWideCells?: number;
+    /** Distinct fields the json rule creates per result. Default 200. */
+    maxFlattenedFields?: number;
+  };
 }
 
 export interface LogsConfig {
@@ -151,4 +162,17 @@ export interface Catalog {
   /** False when the index could not be read: fields come from sample logs. */
   indexKnown: boolean;
   message?: string;
+}
+
+/**
+ * How SLS filters a field of a result, as the backend decides for dashboard filters (frame meta
+ * `filterFields`, see describeFilters in pkg/datasource.go). null: the field exists only in Grafana.
+ */
+export interface FilterDescriptor {
+  /** SLS field for search conditions. */
+  key?: string;
+  /** SPL expression for where clauses. */
+  expr: string;
+  /** Write a search condition (the field is indexed); otherwise a where clause. */
+  search: boolean;
 }

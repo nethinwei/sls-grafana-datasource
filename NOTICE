@@ -1,0 +1,15 @@
+nethinwei-sls-datasource
+Copyright (c) 2026 nethinwei
+
+This project is derived from aliyun/aliyun-log-grafana-datasource-plugin version 2.39.2
+(https://github.com/aliyun/aliyun-log-grafana-datasource-plugin), released under the MIT
+License, copyright Alibaba Cloud and its contributors. That project was originally created from
+the Grafana data source plugin template, copyright (c) 2016 Grafana. The history of both is kept
+in this repository.
+
+This project is not affiliated with, sponsored or endorsed by Alibaba Cloud or Grafana Labs.
+Alibaba Cloud, Aliyun and Simple Log Service (SLS) are trademarks of Alibaba Group. Grafana is a
+trademark of Grafana Labs. They are used here only to describe what this plugin works with.
+
+Release packages include the license files of the Go modules compiled into the backend under
+licenses/, and those of the frontend dependencies in module.js.LICENSE.txt.

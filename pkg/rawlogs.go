@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	sls "github.com/aliyun/aliyun-log-go-sdk"
 	"github.com/pierrec/lz4/v4"
@@ -34,7 +36,7 @@ func (ds *datasource) getLogs(ctx context.Context, logstore string, req *sls.Get
 		return nil, err
 	}
 	return call(ctx, func() (*logsResponse, error) {
-		raw, err := ds.rawRequest("POST", "/logstores/"+url.PathEscape(logstore)+"/logs", map[string]string{
+		raw, err := ds.rawRequest(ctx, "POST", "/logstores/"+url.PathEscape(logstore)+"/logs", map[string]string{
 			"x-log-bodyrawsize": strconv.Itoa(len(body)),
 			"Content-Type":      "application/json",
 			"Accept-Encoding":   "lz4",
@@ -64,7 +66,7 @@ func (ds *datasource) contextLogs(ctx context.Context, logstore string, back, fo
 	q.Set("pack_id", packID)
 	q.Set("pack_meta", packMeta)
 	return call(ctx, func() (*logsResponse, error) {
-		raw, err := ds.rawRequest("GET", "/logstores/"+url.PathEscape(logstore)+"?"+q.Encode(),
+		raw, err := ds.rawRequest(ctx, "GET", "/logstores/"+url.PathEscape(logstore)+"?"+q.Encode(),
 			map[string]string{"x-log-bodyrawsize": "0", "Accept": "application/json"}, nil)
 		if err != nil {
 			return nil, err
@@ -81,9 +83,40 @@ func (ds *datasource) contextLogs(ctx context.Context, logstore string, back, fo
 	})
 }
 
-// rawRequest sends a signed request and returns the (decompressed) body. Non-200 responses come
-// back from the SDK as *sls.Error.
-func (ds *datasource) rawRequest(method, uri string, headers map[string]string, body []byte) ([]byte, error) {
+// Retry budget of one raw request, as the SDK's own requests use (retryTimeout).
+const (
+	retryFirstWait = 200 * time.Millisecond
+	retryMaxWait   = 3 * time.Second
+	// maxResponseSize bounds the decompressed body a response may declare.
+	maxResponseSize = 1 << 30
+)
+
+// rawRequest sends a signed request and returns the (decompressed) body. RawRequest skips the
+// SDK's retry, so it is done here with the same rule (network errors and 5xx responses, until
+// retryTimeout). Non-200 responses come back from the SDK as *sls.Error or *sls.BadResponseError;
+// network errors are wrapped as SLS client errors so they count as downstream.
+func (ds *datasource) rawRequest(ctx context.Context, method, uri string, headers map[string]string, body []byte) ([]byte, error) {
+	deadline := time.Now().Add(retryTimeout)
+	wait := retryFirstWait
+	for {
+		h := make(map[string]string, len(headers)) // the SDK adds signature headers to the map
+		for k, v := range headers {
+			h[k] = v
+		}
+		buf, err := ds.rawRequestOnce(method, uri, h, body)
+		if err == nil || !retryable(err) || time.Now().Add(wait).After(deadline) {
+			return buf, asSLSError(err)
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(wait):
+		}
+		wait = min(wait*2, retryMaxWait)
+	}
+}
+
+func (ds *datasource) rawRequestOnce(method, uri string, headers map[string]string, body []byte) ([]byte, error) {
 	r, err := ds.project.RawRequest(method, uri, headers, body)
 	if err != nil {
 		return nil, err
@@ -97,8 +130,8 @@ func (ds *datasource) rawRequest(method, uri string, headers map[string]string, 
 		return buf, nil
 	}
 	size, err := strconv.Atoi(r.Header.Get("x-log-bodyrawsize"))
-	if err != nil {
-		return nil, fmt.Errorf("lz4 response without a valid x-log-bodyrawsize: %w", err)
+	if err != nil || size <= 0 || size > maxResponseSize {
+		return nil, fmt.Errorf("lz4 response with an invalid x-log-bodyrawsize %q", r.Header.Get("x-log-bodyrawsize"))
 	}
 	out := make([]byte, size)
 	n, err := lz4.UncompressBlock(buf, out)
@@ -106,6 +139,36 @@ func (ds *datasource) rawRequest(method, uri string, headers map[string]string, 
 		return nil, fmt.Errorf("decompress response: %w", err)
 	}
 	return out[:n], nil
+}
+
+// retryable mirrors the SDK's rule for read requests: network failures and 5xx responses.
+func retryable(err error) bool {
+	var ue *url.Error
+	var se *sls.Error
+	var be *sls.BadResponseError
+	switch {
+	case errors.As(err, &ue):
+		return true
+	case errors.As(err, &se):
+		return se.HTTPCode >= 500 && se.HTTPCode <= 599
+	case errors.As(err, &be):
+		return be.HTTPCode >= 500 && be.HTTPCode <= 599
+	}
+	return false
+}
+
+// asSLSError wraps errors that are not SLS responses (DNS, connection, TLS) as SLS client errors.
+func asSLSError(err error) error {
+	var se *sls.Error
+	var be *sls.BadResponseError
+	var ue *url.Error
+	if err == nil || errors.As(err, &se) || errors.As(err, &be) {
+		return err
+	}
+	if errors.As(err, &ue) {
+		return sls.NewClientError(err)
+	}
+	return err
 }
 
 func decodeRows(raw []json.RawMessage) ([]map[string]string, [][]string, error) {

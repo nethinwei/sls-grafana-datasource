@@ -57,6 +57,8 @@ func (ds *datasource) logsContext(ctx context.Context, logstore string, p *conte
 		logs[i], keys[i] = r.log, r.keys
 	}
 	frame := buildLogsFrame(logs, keys, &ds.cfg.view)
+	keepOrder(frame, p.Direction == "forward")
+	ds.describeFilters(ctx, logstore, frame)
 	frame.Meta.ExecutedQueryString = fmt.Sprintf("logstore: %s\nGetContextLogs pack_id=%s pack_meta=%s back_lines=%d forward_lines=%d",
 		logstore, p.PackID, p.PackMeta, back, forward)
 	return data.Frames{frame}, nil
@@ -73,15 +75,15 @@ func (ds *datasource) logsVolume(ctx context.Context, logstore, query string, q 
 		return data.Frames{}, nil
 	}
 	sql, err := applyMacros(fmt.Sprintf(`%s | select $__timeGroup(__time__) as time, %s as level, count(*) as count group by time, level order by time limit 100000`,
-		query, quoteIdentifier(ds.cfg.view.levelField)), q.TimeRange, q.Interval)
+		query, quoteIdentifier(ds.cfg.view.slsName(ds.cfg.view.levelField))), q.TimeRange, q.Interval)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := ds.getLogs(ctx, logstore, &sls.GetLogRequest{
+	resp, err := ds.getLogsComplete(ctx, logstore, &sls.GetLogRequest{
 		From: q.TimeRange.From.Unix(), FromNsPart: int32(q.TimeRange.From.Nanosecond()),
 		To: q.TimeRange.To.Unix(), ToNsPart: int32(q.TimeRange.To.Nanosecond()),
 		Query: sql,
-	})
+	}, completeRetryDashboard)
 	if err == nil {
 		frames, err := buildVolumeFrames(resp.Logs, ds.cfg.sqlLocation)
 		if err != nil {
@@ -109,9 +111,34 @@ func (ds *datasource) logsVolume(ctx context.Context, logstore, query string, q 
 		Type:                data.FrameTypeTimeSeriesMulti,
 		ExecutedQueryString: fmt.Sprintf("logstore: %s\nGetHistograms query: %s", logstore, query),
 		Notices: []data.Notice{{Severity: data.NoticeSeverityInfo,
-			Text: fmt.Sprintf("Enable SQL statistics on field %q to split the volume by level.", ds.cfg.view.levelField)}},
+			Text: fmt.Sprintf("Logs volume by level is not available (%s); showing the total. Enabling SQL statistics on field %q usually fixes it.",
+				errorText(err), ds.cfg.view.slsName(ds.cfg.view.levelField))}},
 	}
 	return data.Frames{f}, nil
+}
+
+// keepOrder makes the times of context rows strictly monotonic in their order (closest first), so
+// that rows written in the same second, often without nanoseconds, keep their order when Grafana
+// sorts them by time and are not taken for duplicates.
+func keepOrder(frame *data.Frame, forward bool) {
+	if len(frame.Fields) == 0 || frame.Fields[0].Type() != data.FieldTypeTime {
+		return
+	}
+	f := frame.Fields[0]
+	for i := 1; i < f.Len(); i++ {
+		prev, cur := f.At(i-1).(time.Time), f.At(i).(time.Time)
+		if forward && !cur.After(prev) {
+			f.Set(i, prev.Add(time.Nanosecond))
+		} else if !forward && !cur.Before(prev) {
+			f.Set(i, prev.Add(-time.Nanosecond))
+		}
+	}
+}
+
+// errorText is the readable message of an error, as shown in panels.
+func errorText(err error) string {
+	_, _, msg := classifyError(err)
+	return msg
 }
 
 func annotate(frames data.Frames, logstore, query string, metas []sls.GetLogsV3ResponseMeta) {
