@@ -966,7 +966,8 @@ func (ds *SlsDatasource) BuildLogs(logs []map[string]string, ycols []string, fra
 	fieldMap := make(map[string][]string)
 	var keyArr []string
 	var times []time.Time
-	if len(ycols) == 1 && ycols[0] == "" {
+	autoCols := len(ycols) == 1 && ycols[0] == ""
+	if autoCols {
 		for _, alog := range logs {
 			for k := range alog {
 				if _, ok := fieldMap[k]; !ok {
@@ -975,6 +976,8 @@ func (ds *SlsDatasource) BuildLogs(logs []map[string]string, ycols []string, fra
 				}
 			}
 		}
+		// Map iteration order is random; sort so fields and the message keep the same order across refreshes.
+		sort.Strings(keyArr)
 	} else {
 		for _, ycol := range ycols {
 			fieldMap[ycol] = make([]string, 0)
@@ -983,10 +986,9 @@ func (ds *SlsDatasource) BuildLogs(logs []map[string]string, ycols []string, fra
 	}
 	var values []string
 	for _, alog := range logs {
-		message := ""
+		values = append(values, buildLogMessage(alog, keyArr, autoCols))
 		for _, k := range keyArr {
 			fieldMap[k] = append(fieldMap[k], alog[k])
-			message = message + k + `="` + strings.ReplaceAll(alog[k], `"`, `'`) + `" `
 		}
 		timeValue, _ := strconv.ParseFloat(alog["__time__"], 64)
 
@@ -998,7 +1000,6 @@ func (ds *SlsDatasource) BuildLogs(logs []map[string]string, ycols []string, fra
 			t = time.Unix(int64(timeValue), 0)
 		}
 		times = append(times, t)
-		values = append(values, message)
 	}
 
 	if len(times) > 0 {
@@ -1009,6 +1010,27 @@ func (ds *SlsDatasource) BuildLogs(logs []map[string]string, ycols []string, fra
 		frame.Fields = append(frame.Fields, data.NewField(v, nil, fieldMap[v]))
 	}
 	*frames = append(*frames, frame)
+}
+
+// buildLogMessage renders the log line shown in the Logs panel as `key="value"` pairs.
+// Only keys present in this log are rendered: keyArr is the union of keys across all returned logs,
+// and rendering absent keys would fill every line with empty `key=""` pairs.
+// When the columns are not chosen by the user (autoCols), SLS reserved/meta fields such as
+// __time__, __source__, __topic__ and __tag__:* are left out of the line; they remain available
+// as separate fields in the log details.
+func buildLogMessage(alog map[string]string, keyArr []string, autoCols bool) string {
+	var b strings.Builder
+	for _, k := range keyArr {
+		v, ok := alog[k]
+		if !ok || (autoCols && strings.HasPrefix(k, "__")) {
+			continue
+		}
+		b.WriteString(k)
+		b.WriteString(`="`)
+		b.WriteString(strings.ReplaceAll(v, `"`, `'`))
+		b.WriteString(`" `)
+	}
+	return b.String()
 }
 
 // BuildTrace
