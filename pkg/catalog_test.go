@@ -157,7 +157,7 @@ func TestCatalogJSONFields(t *testing.T) {
 	if f, ok := c.byName("request_method"); !ok || f.SLSName != "request.method" || f.Rule != "json" || !*f.Indexed {
 		t.Errorf("indexed JSON key: %+v", f)
 	}
-	if f, ok := c.byName("request_path"); !ok || f.SLSName != "" || f.Rule != "json" || f.Expr != `json_extract_scalar("request", '$["path"]')` {
+	if f, ok := c.byName("request_path"); !ok || f.SLSName != "" || f.Rule != "json" || f.Expr != `coalesce("request_path", json_extract_scalar("request", '$["path"]'))` {
 		t.Errorf("JSON key found in samples: %+v", f)
 	}
 	if _, ok := c.byName("request.method"); ok {
@@ -165,7 +165,7 @@ func TestCatalogJSONFields(t *testing.T) {
 	}
 	cat := &catalog{Fields: c.Fields}
 	q, skipped := applyAdhocFilters("*", []adhocFilter{{Key: "request_method", Operator: "=", Value: "POST"}, {Key: "request_path", Operator: "=", Value: "/v1"}}, view, cat, nil)
-	if q != `request.method: "POST" | where json_extract_scalar("request", '$["path"]') = '/v1'` || len(skipped) != 0 {
+	if q != `request.method: "POST" | where coalesce("request_path", json_extract_scalar("request", '$["path"]')) = '/v1'` || len(skipped) != 0 {
 		t.Errorf("filters: %q %v", q, skipped)
 	}
 }
@@ -180,8 +180,8 @@ func TestFlattenedFieldFilters(t *testing.T) {
 		t.Errorf("grafanaOnlyFields = %v", custom[grafanaOnlyFieldsKey])
 	}
 	exprs := custom[fieldExprsKey].(map[string]string)
-	if exprs["http_client_ip"] != `json_extract_scalar("http", '$["client"]["ip"]')` ||
-		exprs["labels_app_kubernetes_io_name"] != `json_extract_scalar("labels", '$["app.kubernetes.io/name"]')` {
+	if exprs["http_client_ip"] != `coalesce("http_client_ip", json_extract_scalar("http", '$["client"]["ip"]'))` ||
+		exprs["labels_app_kubernetes_io_name"] != `coalesce("labels_app_kubernetes_io_name", json_extract_scalar("labels", '$["app.kubernetes.io/name"]'))` {
 		t.Errorf("exprs = %v", exprs)
 	}
 	ds := &datasource{}
@@ -193,7 +193,7 @@ func TestFlattenedFieldFilters(t *testing.T) {
 		{Key: "http_client_ip", Operator: "!=", Value: "1.1.1.1"},
 		{Key: "word", Operator: "=", Value: "a"},
 	}, view, &catalog{}, ds.learnedField)
-	want := `level: ERROR | where json_extract_scalar("http", '$["method"]') = 'POST' and coalesce(json_extract_scalar("http", '$["client"]["ip"]'), '') != '1.1.1.1'`
+	want := `level: ERROR | where coalesce("http_method", json_extract_scalar("http", '$["method"]')) = 'POST' and coalesce(coalesce("http_client_ip", json_extract_scalar("http", '$["client"]["ip"]')), '') != '1.1.1.1'`
 	if q != want || len(skipped) != 1 {
 		t.Errorf("got  %s %v\nwant %s", q, skipped, want)
 	}

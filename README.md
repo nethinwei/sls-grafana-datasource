@@ -101,6 +101,29 @@
 日志行的值按 logfmt 写法加引号，值里的 `"` 和 `\` 会转义。嵌套对象（slog 的 Group、记录的结构体或 map；采集端把它存成一段 JSON 文本）和数组原样输出、不加引号，日志详情中会格式化显示。
 
 配置 `json` 规则后，嵌套字段可以像普通字段一样筛选：字段在 SLS 中建了 JSON 索引时用检索（`request.method: "POST"`）；没有索引时用 SPL `| where json_extract_scalar("request", '$["method"]') = 'POST'`，效果等同 Loki 的 `| json | request_method="POST"`。否定条件（`!=`、`!~`）对缺少该字段的日志按空值处理，与 Loki 一致；正则匹配整个值。
+
+也可以在采集时就展开嵌套，让它们成为 SLS 中的真实字段（可建索引、可做 SQL 统计）。LoongCollector 的原生 JSON 解析插件不展开嵌套，需要改用扩展插件 `processor_json`；扩展插件之后不能再接原生插件，时间改用 `processor_gotime` 解析：
+
+```yaml
+processors:
+  - Type: processor_json
+    SourceKey: content
+    ExpandDepth: 0            # 不限深度
+    ExpandConnector: "_"      # 与插件和 Loki 的命名一致：http_client_ip
+    IgnoreFirstConnector: true  # 否则所有字段名都以 _ 开头
+    KeepSource: false
+  - Type: processor_gotime
+    SourceKey: time
+    SourceFormat: "2006-01-02T15:04:05.999999999Z07:00"
+    DestKey: time_parsed
+    DestFormat: "2006-01-02T15:04:05.999999999Z07:00"
+    SetTime: true             # 保留纳秒
+    KeepSource: false
+  - Type: processor_drop
+    DropKeys: [time_parsed]
+```
+
+实测：字段保持写入顺序；数组保留为 JSON 文本，null 存为 `"null"`；键名中的 `-`、`.` 等字符不替换（`request_header_X-Request-Id`），以字符串保存的 JSON 不展开。两种方式可以并存：采集端展开后 `json` 规则不再有事可做；展开字段的筛选同时匹配两种存储（`coalesce("http_method", json_extract_scalar("http", '$["method"]'))`），新旧数据混在一起时也能正确筛选。注意：SLS 执行 SPL `| where` 时，会把条件里用到的字段移到结果的最后，所以这类查询的日志行中这些字段不在原来的位置。
 | Other fields in line | 是否在后面接着显示其余业务字段（不含 `__` 开头的元数据），按日志写入时的顺序，默认开。级别字段已由 Grafana 单独显示，不重复放进日志行，需要时可列入 Line fields |
 | Field rules | 按顺序执行的字段规则 |
 

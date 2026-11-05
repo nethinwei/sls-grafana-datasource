@@ -99,6 +99,29 @@ Log context needs `__tag__:__pack_id__` and `__pack_meta__` on every row: the pl
 Line values are quoted as in logfmt, with `"` and `\` escaped. Nested objects (slog groups, logged structs or maps; collectors store them as JSON text) and arrays are written as they are, unquoted, and pretty-printed in the log details.
 
 With a `json` rule, nested fields filter like any other field: by search when the field has a JSON index in SLS (`request.method: "POST"`), otherwise with SPL `| where json_extract_scalar("request", '$["method"]') = 'POST'`, like Loki's `| json | request_method="POST"`. Negative operators (`!=`, `!~`) treat a missing field as empty, as Loki does; regexes match the whole value.
+
+Nested objects can also be expanded at collection time, so they become real SLS fields (indexable, usable in SQL). LoongCollector's native JSON parser does not expand nesting; use the extended `processor_json`. Native processors cannot follow extended ones, so parse the time with `processor_gotime`:
+
+```yaml
+processors:
+  - Type: processor_json
+    SourceKey: content
+    ExpandDepth: 0              # unlimited
+    ExpandConnector: "_"        # same naming as the plugin and Loki: http_client_ip
+    IgnoreFirstConnector: true  # otherwise every name starts with _
+    KeepSource: false
+  - Type: processor_gotime
+    SourceKey: time
+    SourceFormat: "2006-01-02T15:04:05.999999999Z07:00"
+    DestKey: time_parsed
+    DestFormat: "2006-01-02T15:04:05.999999999Z07:00"
+    SetTime: true               # keeps nanoseconds
+    KeepSource: false
+  - Type: processor_drop
+    DropKeys: [time_parsed]
+```
+
+Measured: fields keep their written order; arrays stay JSON text and null becomes `"null"`; characters such as `-` and `.` in keys are kept (`request_header_X-Request-Id`); JSON kept as a string is not expanded. Both ways can coexist: once the collector expands, the `json` rule has nothing left to do, and filters on flattened fields read both forms (`coalesce("http_method", json_extract_scalar("http", '$["method"]'))`), so mixed old and new data filter correctly. Note that SLS moves fields used in an SPL `| where` condition to the end of each row, so in such queries those fields leave their written position in the line.
 | Other fields in line | Append the other business fields (not `__` meta fields) in the order they were written, default on. The level field is shown by Grafana as the level and left out of the line unless listed in Line fields |
 | Field rules | Rules run in order |
 
