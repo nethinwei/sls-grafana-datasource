@@ -7,9 +7,9 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"time"
 
 	sls "github.com/aliyun/aliyun-log-go-sdk"
-	"gitlab.alibaba-inc.com/rapt/go-security-utils/network"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
@@ -238,17 +238,13 @@ func (ds *SlsDatasource) gotoSLS(w http.ResponseWriter, r *http.Request) {
 }
 
 func getSigninToken(id string, secret string, token string, baseDomain string) (*SigninResponse, error) {
-	urlStr := "http://signin." + baseDomain + ".com/federation?Action=GetSigninToken"
+	urlStr := "https://signin." + baseDomain + ".com/federation?Action=GetSigninToken"
 	urlStr += "&AccessKeyId=" + id
 	urlStr += "&AccessKeySecret=" + secret
 	urlStr += "&SecurityToken=" + url.QueryEscape(token)
 	urlStr += "&TicketType=mini"
 
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.DialContext = network.DefaultNetworkFilter.FilterHttpDialContext(transport.DialContext)
-	client := &http.Client{
-		Transport: transport,
-	}
+	client := newPublicOnlyHTTPClient(30 * time.Second)
 
 	res, err := client.Get(urlStr)
 	if err != nil {
@@ -268,7 +264,7 @@ func getSigninToken(id string, secret string, token string, baseDomain string) (
 }
 
 func genSigninUrl(signinToken string, loginUrl string, destination string, baseDomain string) (string, error) {
-	urlStr := "http://signin." + baseDomain + ".com/federation?Action=Login"
+	urlStr := "https://signin." + baseDomain + ".com/federation?Action=Login"
 	urlStr += "&LoginUrl=" + url.QueryEscape(loginUrl)
 	urlStr += "&Destination=" + url.QueryEscape(destination)
 	urlStr += "&SigninToken=" + url.QueryEscape(signinToken)
