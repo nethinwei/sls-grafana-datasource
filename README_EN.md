@@ -130,14 +130,14 @@ Field rules:
 | Rule | Example | Description |
 |---|---|---|
 | `time` | `__time__` + `__time_ns_part__` → `timestamp` | Time from a seconds field plus an optional nanoseconds field. Targeting the time field makes it the log time; without a nanoseconds field the nanoseconds are 0 |
-| `rename` | `__tag__:__hostname__` → `host.name` | Rename. Filters and completion map back to the SLS name |
-| `extract` | `log.file.path` with `/logs/(.+)\.log`, `$1` → `service.name` | Regex extraction, named groups as `${name}` |
+| `rename` | `__tag__:__hostname__` → `host_name` | Rename. Filters and completion map back to the SLS name |
+| `extract` | `log_file_path` with `/logs/(.+)\.log`, `$1` → `service_name` | Regex extraction, named groups as `${name}` |
 | `drop` | `__topic__` | Hide a field |
 | `default` | `deployment.environment` = `prod` | Value when the field is absent or empty |
 | `template` | `${service}/${env}` → `app` | New field from other fields, `$$` is a literal `$` |
 | `json` | `request` → `request_method`, `request_header_Content_Type` | Flattens nested JSON objects into fields, as Loki's `\| json`: keys joined with `_`, characters other than letters, digits and `_` become `_`, arrays and nulls skipped, `_extracted` appended on a name clash. Without from, every field holding a JSON object is flattened |
 
-Without configured rules the defaults apply: build `timestamp` from `__time__` and `__time_ns_part__`, hide both, and flatten every nested object with `json`. "Add OpenTelemetry renames" appends renames to `host.name`, `host.ip` and `log.file.path`. Except for `rename`, fields produced by rules exist only in Grafana and cannot be filtered on. `__tag__:__pack_id__` and `__pack_meta__` are needed by log context and cannot be renamed or dropped; invalid rules are skipped and listed by "Save & test".
+Without configured rules the defaults apply: build `timestamp` from `__time__` and `__time_ns_part__`, hide both, and flatten every nested object with `json`. "Add OpenTelemetry renames" appends renames to `host_name`, `host_ip` and `log_file_path` (OpenTelemetry semantic names with dots as `_`, as Loki stores OpenTelemetry attributes; Grafana's log highlighting only takes letters, digits and `_` as field names). Except for `rename`, fields produced by rules exist only in Grafana and cannot be filtered on. `__tag__:__pack_id__` and `__pack_meta__` are needed by log context and cannot be renamed or dropped; invalid rules are skipped and listed by "Save & test".
 
 Provisioning:
 
@@ -148,15 +148,15 @@ jsonData:
   logs:
     levelField: level
     line:
-      fields: [service_name, host.name, host.ip, msg]
+      fields: [service_name, host_name, host_ip, msg]
       exclude: [source]
     rules:
       - { type: time, from: __time__, nanos: __time_ns_part__, to: timestamp }
       - { type: drop, field: __time__ }
       - { type: drop, field: __time_ns_part__ }
       - { type: json }
-      - { type: rename, from: __tag__:__hostname__, to: host.name }
-      - { type: rename, from: __tag__:__host_ip__, to: host.ip }
+      - { type: rename, from: __tag__:__hostname__, to: host_name }
+      - { type: rename, from: __tag__:__host_ip__, to: host_ip }
 ```
 
 ## Migrating from 2.x

@@ -60,7 +60,7 @@ export interface LogsConfig {
   /** Field holding the log level: level colours and the logs volume. Default `level`. */
   levelField?: string;
   line?: {
-    /** Fields opening the log line, in order (e.g. host.name, host.ip). */
+    /** Fields opening the log line, in order (e.g. service_name, host_name, msg). */
     fields?: string[];
     /** Append the other business fields to the line. Default true. */
     rest?: boolean;
@@ -113,11 +113,16 @@ export const DEFAULT_FIELD_RULES: FieldRule[] = [
   { type: 'json' },
 ];
 
-/** SLS meta fields added by LoongCollector / Logtail, renamed to OpenTelemetry semantic names. */
+/**
+ * SLS meta fields added by LoongCollector / Logtail, renamed to OpenTelemetry semantic names with
+ * dots as "_" (host.name → host_name), as Loki stores OpenTelemetry attributes: Grafana's log
+ * highlighting only takes [A-Za-z0-9_] as a field name, and the names match fields flattened by
+ * the json rule.
+ */
 export const OTEL_FIELD_RULES: FieldRule[] = [
-  { type: 'rename', from: '__tag__:__hostname__', to: 'host.name' },
-  { type: 'rename', from: '__tag__:__host_ip__', to: 'host.ip' },
-  { type: 'rename', from: '__tag__:__path__', to: 'log.file.path' },
+  { type: 'rename', from: '__tag__:__hostname__', to: 'host_name' },
+  { type: 'rename', from: '__tag__:__host_ip__', to: 'host_ip' },
+  { type: 'rename', from: '__tag__:__path__', to: 'log_file_path' },
 ];
 
 /**

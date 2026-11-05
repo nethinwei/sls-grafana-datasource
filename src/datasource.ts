@@ -181,7 +181,7 @@ export class SLSDataSource
 
   /**
    * SLS field behind a field shown in Grafana: detected_level is the level field, renamed fields
-   * (host.name) go back to their SLS name (__tag__:__hostname__). Fields added by the plugin or
+   * (host_name) go back to their SLS name (__tag__:__hostname__). Fields added by the plugin or
    * produced by rules exist only in Grafana and cannot be filtered.
    */
   private filterTarget(

@@ -55,7 +55,7 @@ export const RULE_SCHEMAS: Record<FieldRuleType, RuleSchema> = {
     params: [
       { key: 'from', placeholder: 'SLS field, e.g. __tag__:__hostname__', width: 32 },
       ARROW,
-      { key: 'to', placeholder: 'e.g. host.name', width: 22 },
+      { key: 'to', placeholder: 'e.g. host_name', width: 22 },
     ],
     blank: { type: 'rename', from: '', to: '' },
   },
@@ -66,7 +66,7 @@ export const RULE_SCHEMAS: Record<FieldRuleType, RuleSchema> = {
       { key: 'pattern', placeholder: 'regex, e.g. /logs/(.+)\\.log', width: 26 },
       { key: 'template', placeholder: '$1', width: 10 },
       ARROW,
-      { key: 'to', placeholder: 'e.g. service.name', width: 20 },
+      { key: 'to', placeholder: 'e.g. service_name', width: 20 },
     ],
     blank: { type: 'extract', from: '', to: '', pattern: '' },
   },
