@@ -1,8 +1,7 @@
-import type { AdHocVariableFilter } from '@grafana/data';
-
 /**
  * Helpers that edit the search part of an SLS statement: the text before the first `|` outside
- * quotes. The SQL or SPL after it is kept as is, so filters also apply to SQL panels.
+ * quotes. The SQL or SPL after it is kept as is, so filters also apply to SQL panels. Dashboard ad hoc
+ * filters are translated by the backend (pkg/filters.go), which knows the field catalog.
  */
 
 /** Splits `search | rest` at the first pipe that is not inside quotes. */
@@ -130,67 +129,37 @@ export function addStringFilter(query: string, value: string, negate: boolean): 
   return removeCondition(query, condition) ?? addCondition(query, condition);
 }
 
-/**
- * SLS search has no regex but supports `*` / `?` wildcards (not at the start, value unquoted).
- * Converts simple regexes such as `^pay.*`, `timeout$` or `a.c`; returns undefined otherwise.
- */
-export function regexToWildcard(regex: string): string | undefined {
-  const body = regex.replace(/^\^/, '').replace(/\$$/, '');
-  const wildcard = body.replace(/\.\*/g, '*').replace(/\./g, '?');
-  if (!/^[\w\-/:@*?]+$/.test(wildcard) || /^[*?]/.test(wildcard)) {
-    return undefined;
-  }
-  return wildcard;
+// ---------- SPL `| where` filters, for fields without an SLS index ----------
+
+function splString(value: string): string {
+  return "'" + value.replace(/'/g, "''") + "'";
+}
+
+function whereClause(key: string, value: string, negate: boolean): string {
+  return `| where "${key.replace(/"/g, '""')}" ${negate ? '!=' : '='} ${splString(value)}`;
+}
+
+/** Whether the statement has `| where "key" = 'value'` added by toggleWhereFilter. */
+export function hasWhereFilter(query: string, key: string, value: string): boolean {
+  return query.includes(whereClause(key, value, false));
 }
 
 /**
- * Ad hoc filters of dashboards as an SLS search condition. Supported operators: =, !=, =| / !=|
- * (one of several values), =~ / !~ (simple regexes, as wildcards), <, >, <=, >= (numeric fields).
- * Filters that SLS search cannot express are skipped.
+ * ➕ / ➖ on a field that has no index: SLS search cannot use it, but SPL can filter any field.
+ * Appends `| where "key" = 'value'` (or `!=`); clicking the same one again removes it, and the
+ * opposite clause on the same value is replaced.
  */
-export function adHocCondition(filters: AdHocVariableFilter[]): string {
-  const parts: string[] = [];
-  for (const f of filters) {
-    const values = f.values?.length ? f.values : [f.value];
-    switch (f.operator) {
-      case '=':
-        parts.push(fieldCondition(f.key, f.value));
-        break;
-      case '!=':
-        parts.push(`not ${fieldCondition(f.key, f.value)}`);
-        break;
-      case '=|':
-        parts.push(
-          values.length === 1
-            ? fieldCondition(f.key, values[0])
-            : `(${values.map((v) => fieldCondition(f.key, v)).join(' or ')})`
-        );
-        break;
-      case '!=|':
-        parts.push(...values.map((v) => `not ${fieldCondition(f.key, v)}`));
-        break;
-      case '=~':
-      case '!~': {
-        const wildcard = regexToWildcard(f.value);
-        if (wildcard) {
-          parts.push(`${f.operator === '!~' ? 'not ' : ''}${f.key}: ${wildcard}`);
-        }
-        break;
-      }
-      case '<':
-      case '>':
-      case '<=':
-      case '>=':
-        if (!Number.isNaN(Number(f.value))) {
-          parts.push(`${f.key} ${f.operator} ${Number(f.value)}`);
-        }
-        break;
-    }
+export function toggleWhereFilter(query: string, key: string, value: string, negate: boolean): string {
+  const wanted = whereClause(key, value, negate);
+  const opposite = whereClause(key, value, !negate);
+  const strip = (q: string, clause: string) =>
+    q
+      .replace(' ' + clause, '')
+      .replace(clause, '')
+      .trim();
+  if (query.includes(wanted)) {
+    return strip(query, wanted) || '*';
   }
-  return parts.join(' and ');
-}
-
-export function applyAdHocFilters(query: string, filters: AdHocVariableFilter[] | undefined): string {
-  const condition = filters?.length ? adHocCondition(filters) : '';
-  return condition ? addCondition(query, condition) : query;
+  const base = strip(query, opposite) || '*';
+  return `${base} ${wanted}`;
 }

@@ -14,97 +14,203 @@ import (
 
 // ---------- logs ----------
 
-// buildLogsFrame turns search and SPL results into a frame for the Logs panel: a nanosecond
-// timestamp, a readable line, an id, and every field as its own column (so field overrides such as
-// data links keep working). Grafana takes the severity from a field named "level"; when the
-// configured level field has another name it is copied to "detected_level".
-func buildLogsFrame(logs []map[string]string, levelField string) *data.Frame {
-	var keys []string
-	seen := map[string]bool{}
-	for _, l := range logs {
-		for k := range l {
-			if !seen[k] {
-				seen[k] = true
-				keys = append(keys, k)
-			}
+// buildLogsFrame turns search and SPL results into a frame for the Logs panel: the row timestamp,
+// a readable line, an id, and every field as its own column (so field overrides such as data
+// links keep working). The field rules run first, column by column.
+//
+// keys gives each row's fields in SLS order (nil when unknown: sorted), which the line follows.
+//
+// Grafana takes the severity from a field named "level"; when the configured level field has
+// another name it is copied to "detected_level".
+func buildLogsFrame(logs []map[string]string, keys [][]string, f *logsView) *data.Frame {
+	n := len(logs)
+	t, times := f.table(logs)
+
+	names := make([]string, 0, len(t.cols))
+	for k := range t.cols {
+		names = append(names, k)
+	}
+	// Map iteration order is random; sort so columns keep the same order across refreshes.
+	sort.Strings(names)
+
+	// The line: the configured line fields first, then (rest) the log's own fields in the order
+	// they were written. Meta fields (__*) and fields produced by rules join only when listed; the
+	// level field is shown by Grafana as the level, so it is left out unless listed.
+	listed := make(map[string]bool, len(f.lineFields))
+	var fixed []lineColumn
+	for _, k := range f.lineFields {
+		if c := t.cols[k]; c != nil && !listed[k] {
+			listed[k] = true
+			fixed = append(fixed, lineColumn{name: k, col: c})
 		}
 	}
-	// Map iteration order is random; sort so columns and lines keep the same order across refreshes.
-	sort.Strings(keys)
-
-	times := make([]time.Time, len(logs))
-	lines := make([]string, len(logs))
-	ids := make([]string, len(logs))
-	columns := make(map[string][]string, len(keys))
-	for _, k := range keys {
-		columns[k] = make([]string, len(logs))
+	// rest resolves an SLS key to the column shown for it, once per key; nil when it stays out.
+	// Keys showing the same column (a rename onto an own field) share one entry.
+	rest := map[string]*lineColumn{}
+	byName := map[string]*lineColumn{}
+	resolve := func(key string) *lineColumn {
+		lc, ok := rest[key]
+		if ok {
+			return lc
+		}
+		name := key
+		if shown, renamed := f.shownNames[key]; renamed {
+			name = shown
+		}
+		if c := t.cols[name]; c != nil && !strings.HasPrefix(key, "__") && !listed[name] && name != f.levelField {
+			if lc = byName[name]; lc == nil {
+				lc = &lineColumn{name: name, col: c, row: -1}
+				byName[name] = lc
+			}
+		}
+		rest[key] = lc
+		return lc
 	}
-	for i, l := range logs {
-		times[i] = logTime(l)
-		lines[i] = logLine(l, keys)
-		ids[i] = logID(l, times[i], lines[i], i)
-		for k, v := range l {
-			columns[k][i] = v
+
+	stamps := rowTimestamps(logs, t, times, f.timeField)
+	lines := make([]string, n)
+	ids := make([]string, n)
+	pack, meta := t.cols["__tag__:__pack_id__"], t.cols["__pack_meta__"]
+	// One scratch buffer for all rows: each line costs exactly one allocation (the string).
+	buf := make([]byte, 0, 512)
+	var lastKeys []string
+	var lastCols []*lineColumn
+	for i := 0; i < n; i++ {
+		buf = buf[:0]
+		for _, lc := range fixed {
+			buf = lc.append(buf, i)
+		}
+		if f.lineRest {
+			var rowKeys []string
+			if keys != nil && keys[i] != nil {
+				rowKeys = keys[i]
+			} else {
+				rowKeys = sortedKeys(logs[i])
+			}
+			// Rows sharing a key slice (see decodeObject) resolve it once.
+			if len(rowKeys) == 0 || len(lastKeys) != len(rowKeys) || &lastKeys[0] != &rowKeys[0] {
+				lastKeys, lastCols = rowKeys, lastCols[:0]
+				for _, k := range rowKeys {
+					if lc := resolve(k); lc != nil {
+						lastCols = append(lastCols, lc)
+					}
+				}
+			}
+			for _, lc := range lastCols {
+				if lc.row != i {
+					lc.row = i
+					buf = lc.append(buf, i)
+				}
+			}
+		}
+		lines[i] = string(buf)
+		if pack != nil && meta != nil && pack.present[i] && meta.present[i] {
+			ids[i] = pack.values[i] + "/" + meta.values[i]
+		} else {
+			ids[i] = hashID(stamps[i], lines[i], i)
 		}
 	}
 
 	frame := data.NewFrame("logs",
-		data.NewField("time", nil, times),
+		data.NewField("time", nil, stamps),
 		data.NewField("message", nil, lines),
 		data.NewField("id", nil, ids),
 	)
-	for _, k := range keys {
+	for _, k := range names {
 		if k == "id" {
 			continue // the log's own "id" field would collide with the row id; it is part of the line
 		}
-		frame.Fields = append(frame.Fields, data.NewField(k, nil, columns[k]))
+		frame.Fields = append(frame.Fields, data.NewField(k, nil, t.cols[k].values))
 	}
-	if levelField != "level" && seen[levelField] {
-		frame.Fields = append(frame.Fields, data.NewField("detected_level", nil, columns[levelField]))
+	if f.levelField != "level" {
+		if c := t.cols[f.levelField]; c != nil {
+			frame.Fields = append(frame.Fields, data.NewField("detected_level", nil, c.values))
+		}
 	}
 	frame.Meta = &data.FrameMeta{PreferredVisualization: data.VisTypeLogs}
 	return frame
 }
 
-// logTime combines __time__ (seconds) with __time_ns_part__, which SLS returns when the collector
-// sends nanosecond timestamps.
-func logTime(l map[string]string) time.Time {
-	sec, _ := strconv.ParseInt(l["__time__"], 10, 64)
-	ns, _ := strconv.ParseInt(l["__time_ns_part__"], 10, 64)
-	return time.Unix(sec, ns)
+type lineColumn struct {
+	name string
+	col  *column
+	row  int // last row this column was written to
 }
 
-// logID identifies a log row for Grafana (deduplication, permalinks): the pack ID plus the position
-// inside the pack, which SLS returns with `| with_pack_meta`. Without it, a hash of time and line
-// suffixed with the row index, so identical logs are not merged.
-func logID(l map[string]string, t time.Time, line string, row int) string {
-	if pack, meta := l["__tag__:__pack_id__"], l["__pack_meta__"]; pack != "" && meta != "" {
-		return pack + "/" + meta
+// append writes ` name="value"` (without the leading space on the first pair) when the row has a
+// value.
+func (lc *lineColumn) append(buf []byte, i int) []byte {
+	if !lc.col.present[i] {
+		return buf
 	}
+	if len(buf) > 0 {
+		buf = append(buf, ' ')
+	}
+	buf = append(buf, lc.name...)
+	buf = append(buf, '=', '"')
+	buf = appendQuoted(buf, lc.col.values[i])
+	return append(buf, '"')
+}
+
+func sortedKeys(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// rowTimestamps returns the timestamp of each row: from the time rule that wrote the time field,
+// else from a time field the row has, else (no rule configured it) SLS's __time__ in seconds.
+func rowTimestamps(logs []map[string]string, t *table, times rowTimes, timeField string) []time.Time {
+	out := make([]time.Time, t.n)
+	col := t.cols[timeField]
+	for i := range out {
+		switch {
+		case times.set != nil && times.set[i]:
+			out[i] = times.t[i]
+			continue
+		case col != nil && col.present[i]:
+			if ts, err := parseTimeValue(col.values[i], time.UTC); err == nil {
+				out[i] = ts
+				continue
+			}
+		}
+		if sec, err := strconv.ParseInt(logs[i]["__time__"], 10, 64); err == nil {
+			out[i] = time.Unix(sec, 0)
+		}
+	}
+	return out
+}
+
+// appendQuoted appends v with double quotes replaced, so the line stays parseable as key="value".
+func appendQuoted(buf []byte, v string) []byte {
+	if strings.IndexByte(v, '"') < 0 {
+		return append(buf, v...)
+	}
+	for i := 0; i < len(v); i++ {
+		if v[i] == '"' {
+			buf = append(buf, '\'')
+		} else {
+			buf = append(buf, v[i])
+		}
+	}
+	return buf
+}
+
+// hashID identifies a row without pack data (deduplication, permalinks): a hash of time and line
+// suffixed with the row index, so identical logs are not merged.
+func hashID(t time.Time, line string, row int) string {
 	h := fnv.New64a()
-	_, _ = h.Write([]byte(strconv.FormatInt(t.UnixNano(), 10)))
+	var buf [8]byte
+	ns := t.UnixNano()
+	for i := range buf {
+		buf[i] = byte(ns >> (8 * i))
+	}
+	_, _ = h.Write(buf[:])
 	_, _ = h.Write([]byte(line))
 	return strconv.FormatUint(h.Sum64(), 36) + "_" + strconv.Itoa(row)
-}
-
-// logLine renders `key="value"` pairs for the keys present in this log, leaving out SLS reserved and
-// meta fields (__time__, __source__, __topic__, __tag__:*, ...). They remain separate columns.
-func logLine(l map[string]string, keys []string) string {
-	var b strings.Builder
-	for _, k := range keys {
-		v, ok := l[k]
-		if !ok || strings.HasPrefix(k, "__") {
-			continue
-		}
-		if b.Len() > 0 {
-			b.WriteByte(' ')
-		}
-		b.WriteString(k)
-		b.WriteString(`="`)
-		b.WriteString(strings.ReplaceAll(v, `"`, `'`))
-		b.WriteByte('"')
-	}
-	return b.String()
 }
 
 // ---------- SQL ----------
@@ -316,6 +422,19 @@ var timeLayouts = []string{time.RFC3339Nano, "2006-01-02 15:04:05.999999999", "2
 // date-time strings. Strings without an offset are read in loc, the SLS SQL time zone (UTC+8 by
 // default). Numeric time such as __time__ or $__timeGroup(__time__) has no such ambiguity.
 func parseTimeValue(v string, loc *time.Location) (time.Time, error) {
+	// Integers first: fast, and exact for 19-digit nanosecond values that float64 cannot hold.
+	if i, err := strconv.ParseInt(v, 10, 64); err == nil {
+		switch abs := max(i, -i); {
+		case abs < 1e11:
+			return time.Unix(i, 0), nil
+		case abs < 1e14:
+			return time.UnixMilli(i), nil
+		case abs < 1e17:
+			return time.UnixMicro(i), nil
+		default:
+			return time.Unix(0, i), nil
+		}
+	}
 	if f, err := strconv.ParseFloat(v, 64); err == nil {
 		switch abs := math.Abs(f); {
 		case abs < 1e11:

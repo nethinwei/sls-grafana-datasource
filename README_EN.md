@@ -25,9 +25,9 @@ Download `aliyun-log-service-datasource-<version>.zip` from [Releases](../../rel
 | Region | Region ID such as `cn-hangzhou`; when set, requests use signature V4 |
 | AccessKey | Prefer a RAM user granted only on the logstores you query |
 | SQL time zone | Zone of date-time strings returned by SQL (timestamp columns, `from_unixtime`, `date_format`). SLS uses UTC+8, hence the default `Asia/Shanghai` |
-| Level field | Field holding the log level, default `level` |
+| Logs | How logs are processed and shown: level field, time field, line fields, field rules; see "Log processing" below |
 
-Least privilege: queries need only `log:GetLogStoreLogs`. Optional: `log:GetLogStore` (health check), `log:ListLogStores` (logstore list), `log:GetIndex` (field list and completion; otherwise inferred from sample logs), `log:GetLogStoreContextLogs` (log context), `log:GetLogStoreHistogram` (volume when the level field has no SQL statistics).
+Least privilege: queries need only `log:GetLogStoreLogs`. Optional: `log:GetLogStore` (health check), `log:ListLogStores` (logstore list), `log:GetIndex` (field catalog: completion, hints, field browser and filters; otherwise inferred from sample logs), `log:GetLogStoreContextLogs` (log context), `log:GetLogStoreHistogram` (volume when the level field has no SQL statistics).
 
 ## Query
 
@@ -77,12 +77,56 @@ The Query inspector shows the executed statement and SLS execution statistics; i
 |---|---|
 | Logs volume | Explore shows log counts by level over the whole range, computed by SLS (not only the returned rows). Split by level when the level field has SQL statistics enabled, otherwise the total. Search statements only |
 | Filter from fields | ➕ / ➖ in Explore's log details add `key: "value"` / `not key: "value"` to the search; clicking again removes it |
-| Dashboard filters | ➕ / ➖ in dashboard logs panels create the dashboard Filters variable, applied to every query of this data source (SQL panels included). Keys come from the logstore index, values are ordered by frequency; simple regexes in `=~` / `!~` become SLS wildcards |
+| Dashboard filters | ➕ / ➖ in dashboard logs panels create the dashboard Filters variable, applied to every query of this data source (SQL panels included). The backend translates filters with the field catalog: renamed fields use their SLS name, indexed fields become search conditions, fields without an index SPL `\| where`; simple regexes in `=~` / `!~` become wildcards, others `regexp_like`. Filters that cannot be translated are reported on the panel |
 | Log context | "Show context" in the log row menu: SLS reads the lines around the log from the same source (GetContextLogs), regardless of the query filters |
-| Level | "Level field" in the data source settings (default `level`) drives level colours and the volume |
-| Field completion | The query editor completes field names from the chosen logstore's index |
+| Level | "Logs → Level field" (default `level`) drives level colours and the volume |
+| Completion and hints | The query editor completes fields from the catalog: Grafana name shown, SLS name inserted, with whether the field is searchable and usable in SQL. It warns about search on fields without an index, Grafana-only names in SLS statements, and SQL on fields without statistics |
+| Field browser | The "Fields" button lists the logstore's fields: type, searchable, SQL statistics, and the rule behind them; refresh after changing the index |
 
 Log context needs `__tag__:__pack_id__` and `__pack_meta__` on every row: the plugin appends `| with_pack_meta` to search and SPL queries.
+
+## Log processing
+
+"Logs" in the data source settings controls how logs are shown. It only changes what Grafana shows; SLS data is untouched.
+
+| Setting | Description |
+|---|---|
+| Level field | Level field (name after the rules), default `level` |
+| Time field | Field that becomes the log time, written by a `time` rule, default `timestamp` |
+| Line fields | Fields opening the log line, in order, e.g. `host.name`, `host.ip` to see where a log comes from. Fields produced by rules join the line only when listed here |
+| Other fields in line | Append the other business fields (not `__` meta fields) in the order they were written, default on. The level field is shown by Grafana as the level and left out of the line unless listed in Line fields |
+| Field rules | Rules run in order |
+
+Field rules:
+
+| Rule | Example | Description |
+|---|---|---|
+| `time` | `__time__` + `__time_ns_part__` → `timestamp` | Time from a seconds field plus an optional nanoseconds field. Targeting the time field makes it the log time; without a nanoseconds field the nanoseconds are 0 |
+| `rename` | `__tag__:__hostname__` → `host.name` | Rename. Filters and completion map back to the SLS name |
+| `extract` | `log.file.path` with `/logs/(.+)\.log`, `$1` → `service.name` | Regex extraction, named groups as `${name}` |
+| `drop` | `__topic__` | Hide a field |
+| `default` | `deployment.environment` = `prod` | Value when the field is absent or empty |
+| `template` | `${service}/${env}` → `app` | New field from other fields, `$$` is a literal `$` |
+
+Without configured rules the defaults apply: build `timestamp` from `__time__` and `__time_ns_part__`, then hide both. "Add OpenTelemetry renames" appends renames to `host.name`, `host.ip` and `log.file.path`. Except for `rename`, fields produced by rules exist only in Grafana and cannot be filtered on. `__tag__:__pack_id__` and `__pack_meta__` are needed by log context and cannot be renamed or dropped; invalid rules are skipped and listed by "Save & test".
+
+Provisioning:
+
+```yaml
+jsonData:
+  project: my-project
+  logstore: app-log
+  logs:
+    levelField: level
+    line:
+      fields: [host.name, host.ip]
+    rules:
+      - { type: time, from: __time__, nanos: __time_ns_part__, to: timestamp }
+      - { type: drop, field: __time__ }
+      - { type: drop, field: __time_ns_part__ }
+      - { type: rename, from: __tag__:__hostname__, to: host.name }
+      - { type: rename, from: __tag__:__host_ip__, to: host.ip }
+```
 
 ## Migrating from 2.x
 

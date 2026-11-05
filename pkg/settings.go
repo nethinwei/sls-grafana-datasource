@@ -19,13 +19,29 @@ type settings struct {
 	International bool   `json:"international"` // console on alibabacloud.com instead of aliyun.com
 	// SQLTimeZone is the zone of date-time strings returned by SLS SQL (timestamp columns,
 	// from_unixtime, date_format), which carry no offset. SLS uses UTC+8 by default.
-	SQLTimeZone string `json:"sqlTimeZone"`
-	// LevelField is the log field holding the severity (default "level"). It drives level colouring
-	// and the logs volume histogram; with SQL statistics enabled on it the volume is split by level.
-	LevelField      string `json:"levelField"`
+	SQLTimeZone string     `json:"sqlTimeZone"`
+	Logs        logsConfig `json:"logs"`
+
+	view            logsView // Logs compiled once per instance
 	sqlLocation     *time.Location
 	AccessKeyID     string
 	AccessKeySecret string
+}
+
+// logsConfig is how log rows are processed and presented (jsonData.logs).
+type logsConfig struct {
+	// Rules reshape log rows (see rules.go). Absent means defaultFieldRules; [] means no rules.
+	Rules *[]fieldRule `json:"rules"`
+	// TimeField holds the row timestamp after the rules (default "timestamp").
+	TimeField string `json:"timeField"`
+	// LevelField holds the severity (default "level"): level colours and the logs volume.
+	LevelField string `json:"levelField"`
+	Line       struct {
+		// Fields open the log line in this order, e.g. host.name, host.ip.
+		Fields []string `json:"fields"`
+		// Rest appends the other business fields (default true).
+		Rest *bool `json:"rest"`
+	} `json:"line"`
 }
 
 func loadSettings(s backend.DataSourceInstanceSettings) (*settings, error) {
@@ -39,9 +55,6 @@ func loadSettings(s backend.DataSourceInstanceSettings) (*settings, error) {
 	cfg.AccessKeyID = s.DecryptedSecureJSONData["accessKeyId"]
 	cfg.AccessKeySecret = s.DecryptedSecureJSONData["accessKeySecret"]
 
-	if cfg.LevelField == "" {
-		cfg.LevelField = "level"
-	}
 	if cfg.SQLTimeZone == "" {
 		cfg.SQLTimeZone = "Asia/Shanghai"
 	}
@@ -50,6 +63,7 @@ func loadSettings(s backend.DataSourceInstanceSettings) (*settings, error) {
 		return nil, fmt.Errorf("invalid SQL time zone %q: %w", cfg.SQLTimeZone, err)
 	}
 	cfg.sqlLocation = loc
+	cfg.view = compileLogsView(cfg.Logs)
 
 	switch {
 	case cfg.Endpoint == "":

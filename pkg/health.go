@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	sls "github.com/aliyun/aliyun-log-go-sdk"
@@ -46,10 +47,11 @@ func (ds *datasource) CheckHealth(ctx context.Context, _ *backend.CheckHealthReq
 }
 
 func ok(cfg *settings) *backend.CheckHealthResult {
-	return &backend.CheckHealthResult{
-		Status:  backend.HealthStatusOk,
-		Message: fmt.Sprintf("Connected to %s/%s.", cfg.Project, cfg.LogStore),
+	msg := fmt.Sprintf("Connected to %s/%s.", cfg.Project, cfg.LogStore)
+	if len(cfg.view.problems) > 0 {
+		msg += " Ignored field rules: " + strings.Join(cfg.view.problems, "; ")
 	}
+	return &backend.CheckHealthResult{Status: backend.HealthStatusOk, Message: msg}
 }
 
 func healthError(msg string, err error) *backend.CheckHealthResult {

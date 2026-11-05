@@ -20,6 +20,10 @@
 - 健康检查与 logstore 列表支持只授权到 logstore 的 AccessKey。
 - 前端迁移到 @grafana/create-plugin、@grafana/* 13.2、React 19；新的查询编辑器（SLS 语法高亮与补全）、配置页与变量编辑器；检索中的 `key: $var` 多值变量自动展开。
 - 日志浏览：完整时间范围的日志量直方图（按级别）；Explore 中点字段 ➕/➖ 筛选；看板 Ad hoc 筛选（字段来自索引，取值按频次，支持简单正则转通配符）；日志上下文（GetContextLogs）；查询编辑器字段名补全；数据源配置新增级别字段。
+- 日志处理：数据源配置新增「Logs」（`jsonData.logs`）：级别字段、时间字段、日志行字段（例如 `host.name`、`host.ip` 放在行首）与字段规则 `time` / `rename` / `extract` / `drop` / `default` / `template`。纳秒时间由默认的 `time` 规则合成，采集端没有纳秒字段时按 0 处理。
+- 字段目录（`/api/catalog`，取代 `/api/fields`）：索引与样本日志合并，再按规则换算，带缓存。补全显示 Grafana 字段名并插入 SLS 字段名；编辑器提示无索引检索、Grafana 字段名误用与无统计的 SQL 字段；新增字段浏览。
+- 看板筛选改由后端按字段目录翻译：改名字段用 SLS 原名，无索引字段用 SPL `| where`，复杂正则用 `regexp_like`，无法翻译时在面板上提示；字段取值候选同样支持改名字段与规则产生的字段。
+- 日志行按日志写入时的字段顺序拼接（GetLogs / GetContextLogs 自行解析响应以保留顺序）；级别字段不再重复出现在日志行中。
 - 日志行带 `id`（pack ID + pack meta），检索与 SPL 自动追加 `| with_pack_meta`。
 - 修复检索翻页时用第一页而不是上一页判断是否继续的问题。
 - 去掉内网依赖，外部可以构建；STS 签名请求改用 https（该功能随后已删除）。

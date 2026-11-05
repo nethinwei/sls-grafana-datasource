@@ -1,7 +1,9 @@
 import { CodeEditor, type Monaco, type monacoTypes } from '@grafana/ui';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 
+import type { Catalog } from '../types';
 import { getCompletionProvider, setModelFields } from '../language/completion';
+import { fieldDiagnostics } from '../language/diagnostics';
 import { slsLanguageDefinition } from '../language/definition';
 import { language, languageConfiguration } from '../language/sls';
 
@@ -25,33 +27,60 @@ interface Props {
   onChange: (value: string) => void;
   onRunQuery?: () => void;
   height?: number;
-  /** Field names suggested while typing. */
-  fields?: string[];
+  /** Field catalog of the logstore: completion and hints on fields. */
+  catalog?: Catalog;
 }
 
+const MARKER_OWNER = 'sls-fields';
+
 /** SLS search / SPL / SQL editor with syntax highlighting and completion. */
-export function SLSQueryField({ value, onChange, onRunQuery, height = 80, fields }: Props) {
+export function SLSQueryField({ value, onChange, onRunQuery, height = 80, catalog }: Props) {
   // The Shift+Enter command is registered once on mount; read the latest callbacks through refs.
   const latest = useRef({ onChange, onRunQuery });
   useEffect(() => {
     latest.current = { onChange, onRunQuery };
   }, [onChange, onRunQuery]);
 
-  const [modelUri, setModelUri] = useState<string>();
+  const [editor, setEditor] = useState<{ ed: monacoTypes.editor.IStandaloneCodeEditor; monaco: Monaco }>();
   useEffect(() => {
-    if (!modelUri) {
+    const model = editor?.ed.getModel();
+    if (!editor || !model) {
       return;
     }
-    setModelFields(modelUri, fields);
-    return () => setModelFields(modelUri, undefined);
-  }, [modelUri, fields]);
+    const uri = model.uri.toString();
+    setModelFields(uri, catalog?.fields);
+    // Hints follow the text as it is typed.
+    const mark = () => {
+      const markers = fieldDiagnostics(model.getValue(), catalog?.fields ?? [], Boolean(catalog?.indexKnown)).map(
+        (d) => {
+          const start = model.getPositionAt(d.start);
+          const end = model.getPositionAt(d.end);
+          return {
+            severity: editor.monaco.MarkerSeverity.Warning,
+            message: d.message,
+            startLineNumber: start.lineNumber,
+            startColumn: start.column,
+            endLineNumber: end.lineNumber,
+            endColumn: end.column,
+          };
+        }
+      );
+      editor.monaco.editor.setModelMarkers(model, MARKER_OWNER, markers);
+    };
+    mark();
+    const sub = model.onDidChangeContent(mark);
+    return () => {
+      sub.dispose();
+      setModelFields(uri, undefined);
+    };
+  }, [editor, catalog]);
 
-  const onEditorDidMount = useCallback((editor: monacoTypes.editor.IStandaloneCodeEditor, monaco: Monaco) => {
-    editor.addCommand(monaco.KeyMod.Shift | monaco.KeyCode.Enter, () => {
-      latest.current.onChange(editor.getValue());
+  const onEditorDidMount = useCallback((ed: monacoTypes.editor.IStandaloneCodeEditor, monaco: Monaco) => {
+    ed.addCommand(monaco.KeyMod.Shift | monaco.KeyCode.Enter, () => {
+      latest.current.onChange(ed.getValue());
       latest.current.onRunQuery?.();
     });
-    setModelUri(editor.getModel()?.uri.toString());
+    setEditor({ ed, monaco });
   }, []);
 
   return (

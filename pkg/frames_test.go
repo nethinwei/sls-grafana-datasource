@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -33,7 +34,7 @@ func TestBuildLogsFrame(t *testing.T) {
 			"__tag__:__hostname__": "host-a", "level": "ERROR", "msg": `pay "failed"`, "code": "12001"},
 		{"__time__": "1700000001", "level": "WARN", "msg": "slow", "channel": "coda", "error": ""},
 	}
-	f := buildLogsFrame(logs, "level")
+	f := buildLogsFrame(logs, nil, testView(nil, nil, true))
 
 	if f.Meta.PreferredVisualization != data.VisTypeLogs {
 		t.Errorf("preferred visualisation = %q", f.Meta.PreferredVisualization)
@@ -41,7 +42,8 @@ func TestBuildLogsFrame(t *testing.T) {
 	if got := field(t, f, "time").At(0).(time.Time); !got.Equal(time.Unix(1700000000, 123456789)) {
 		t.Errorf("time = %v, want nanosecond precision", got)
 	}
-	want := []string{`code="12001" level="ERROR" msg="pay 'failed'"`, `channel="coda" error="" level="WARN" msg="slow"`}
+	// Without the SLS key order the line is sorted; the level is shown by Grafana, not in the line.
+	want := []string{`code="12001" msg="pay 'failed'"`, `channel="coda" error="" msg="slow"`}
 	for i, w := range want {
 		if got := field(t, f, "message").At(i).(string); got != w {
 			t.Errorf("message[%d] = %q, want %q", i, got, w)
@@ -54,7 +56,7 @@ func TestBuildLogsFrame(t *testing.T) {
 		t.Errorf("mismatched field lengths: %v", err)
 	}
 	// Stable column order across calls.
-	again := buildLogsFrame(logs, "level")
+	again := buildLogsFrame(logs, nil, testView(nil, nil, true))
 	if a, b := fieldNames(f), fieldNames(again); len(a) != len(b) {
 		t.Fatal("column count changed")
 	} else {
@@ -169,7 +171,7 @@ func TestLogsFrameIDAndLevel(t *testing.T) {
 		{"__time__": "1700000000", "severity": "WARN", "msg": "same"},
 		{"__time__": "1700000000", "severity": "WARN", "msg": "same"},
 	}
-	f := buildLogsFrame(logs, "severity")
+	f := buildLogsFrame(logs, nil, testViewLevel("severity"))
 	ids := field(t, f, "id")
 	if ids.At(0) != "P-1/0|abc|9|8" {
 		t.Errorf("id from pack = %v", ids.At(0))
@@ -181,11 +183,11 @@ func TestLogsFrameIDAndLevel(t *testing.T) {
 		t.Errorf("detected_level = %v", got)
 	}
 	// The log's own "id" field stays in the line and does not clash with the row id.
-	if got := field(t, f, "message").At(0).(string); got != `id="biz-1" msg="a" severity="ERROR"` {
+	if got := field(t, f, "message").At(0).(string); got != `id="biz-1" msg="a"` {
 		t.Errorf("message = %q", got)
 	}
 	// With the default level field no copy is added.
-	if g := buildLogsFrame(logs[:1], "level"); len(fieldNames(g)) == len(fieldNames(f)) {
+	if g := buildLogsFrame(logs[:1], nil, testView(nil, nil, true)); len(fieldNames(g)) == len(fieldNames(f)) {
 		for _, n := range fieldNames(g) {
 			if n == "detected_level" {
 				t.Error("detected_level must only be added for a non-default level field")
@@ -219,5 +221,156 @@ func TestBuildVolumeFrames(t *testing.T) {
 		if fmt.Sprint(got[l]) != fmt.Sprint(w) {
 			t.Errorf("level %s = %v, want %v (sorted by time)", l, got[l], w)
 		}
+	}
+}
+
+// testView compiles a logs config: rules nil means the defaults.
+func testView(rules []fieldRule, lineFields []string, lineRest bool) *logsView {
+	cfg := logsConfig{}
+	if rules != nil {
+		cfg.Rules = &rules
+	}
+	cfg.Line.Fields, cfg.Line.Rest = lineFields, &lineRest
+	v := compileLogsView(cfg)
+	if len(v.problems) > 0 {
+		panic(v.problems)
+	}
+	return &v
+}
+
+func testViewLevel(level string) *logsView {
+	v := compileLogsView(logsConfig{LevelField: level})
+	return &v
+}
+
+func TestLogsFrameFieldRules(t *testing.T) {
+	logs := []map[string]string{
+		{"__time__": "1700000000", "__tag__:__hostname__": "web-1", "__tag__:__host_ip__": "10.0.0.1",
+			"__tag__:__path__": "/logs/topup.log", "__tag__:__pack_id__": "P", "__pack_meta__": "0|x|1|1", "__topic__": "", "msg": "a"},
+		// The application's own host.name wins over the collector tag.
+		{"__time__": "1700000001", "__tag__:__hostname__": "web-2", "host.name": "app-host", "msg": "b"},
+	}
+	rules := append(append([]fieldRule{}, defaultFieldRules...),
+		fieldRule{Type: "rename", From: "__tag__:__hostname__", To: "host.name"},
+		fieldRule{Type: "rename", From: "__tag__:__host_ip__", To: "host.ip"},
+		fieldRule{Type: "extract", From: "__tag__:__path__", To: "service.name", Pattern: `/logs/(.+)\.log`},
+		fieldRule{Type: "drop", Field: "__topic__"},
+	)
+	f := buildLogsFrame(logs, nil, testView(rules, []string{"host.name", "host.ip", "missing"}, true))
+
+	names := map[string]bool{}
+	for _, n := range fieldNames(f) {
+		names[n] = true
+	}
+	for _, n := range []string{"host.name", "host.ip", "service.name", "__tag__:__path__", "__tag__:__pack_id__"} {
+		if !names[n] {
+			t.Errorf("missing column %q in %v", n, fieldNames(f))
+		}
+	}
+	for _, n := range []string{"__tag__:__hostname__", "__tag__:__host_ip__", "__topic__", "__time__"} {
+		if names[n] {
+			t.Errorf("column %q should not exist", n)
+		}
+	}
+	if got := field(t, f, "host.name"); got.At(0) != "web-1" || got.At(1) != "app-host" {
+		t.Errorf("host.name = %v, %v", got.At(0), got.At(1))
+	}
+	// lineFields open the line in order (missing ones skipped); service.name is a rule output that
+	// is not listed, so it stays in details only.
+	if got := field(t, f, "message").At(0); got != `host.name="web-1" host.ip="10.0.0.1" msg="a"` {
+		t.Errorf("line = %q", got)
+	}
+	if got := field(t, f, "id").At(0); got != "P/0|x|1|1" {
+		t.Errorf("id = %q", got)
+	}
+
+	// lineRest off: only the listed fields.
+	only := buildLogsFrame(logs, nil, testView(rules, []string{"msg", "host.name"}, false))
+	if got := field(t, only, "message").At(0); got != `msg="a" host.name="web-1"` {
+		t.Errorf("line without rest = %q", got)
+	}
+}
+
+func TestDefaultRulesBuildTheTimestamp(t *testing.T) {
+	logs := []map[string]string{
+		{"__time__": "1700000000", "__time_ns_part__": "123456789", "msg": "a"},
+		{"__time__": "1700000001", "msg": "no nanoseconds from this collector"},
+	}
+	f := buildLogsFrame(logs, nil, testView(nil, nil, true))
+	for _, n := range fieldNames(f) {
+		if n == "__time__" || n == "__time_ns_part__" || n == "timestamp" {
+			t.Errorf("%s should not be a column with the default rules", n)
+		}
+	}
+	tf := field(t, f, "time")
+	if !tf.At(0).(time.Time).Equal(time.Unix(1700000000, 123456789)) || !tf.At(1).(time.Time).Equal(time.Unix(1700000001, 0)) {
+		t.Errorf("times = %v, %v", tf.At(0), tf.At(1))
+	}
+
+	// No rules at all: the raw fields stay and the row time falls back to __time__ (seconds).
+	none := buildLogsFrame(logs, nil, testView([]fieldRule{}, nil, true))
+	if got := field(t, none, "time").At(0).(time.Time); !got.Equal(time.Unix(1700000000, 0)) {
+		t.Errorf("fallback time = %v", got)
+	}
+	field(t, none, "__time_ns_part__")
+
+	// A time rule can also write a visible field, e.g. a normalised timestamp for the line.
+	visible := buildLogsFrame(logs, nil, testView(append(append([]fieldRule{}, defaultFieldRules[0]),
+		fieldRule{Type: "time", From: "__time__", Nanos: "__time_ns_part__", To: "log.time"}), []string{"log.time"}, false))
+	if got := field(t, visible, "message").At(0); got != `log.time="2023-11-14T22:13:20.123456789Z"` {
+		t.Errorf("line = %q", got)
+	}
+}
+
+func TestLogsLineKeepsSLSOrder(t *testing.T) {
+	logs := []map[string]string{{
+		"__time__": "1700000000", "level": "INFO", "msg": "paid", "service_name": "pay", "order_id": "TP1",
+		"__tag__:__hostname__": "web-1", "svc_host": "h", "host.name": "app-host",
+	}}
+	keys := [][]string{{"level", "msg", "service_name", "order_id", "svc_host", "host.name", "__tag__:__hostname__", "__time__"}}
+	rules := append(append([]fieldRule{}, defaultFieldRules...),
+		fieldRule{Type: "rename", From: "__tag__:__hostname__", To: "host.name"},
+		fieldRule{Type: "rename", From: "svc_host", To: "service.host"},
+		fieldRule{Type: "rename", From: "order_id", To: "service_name"}, // onto an own field: shown once
+	)
+	f := buildLogsFrame(logs, keys, testView(rules, []string{"host.name"}, true))
+	want := `host.name="app-host" msg="paid" service_name="pay" service.host="h"`
+	if got := field(t, f, "message").At(0).(string); got != want {
+		t.Errorf("line = %q\nwant   %q", got, want)
+	}
+	// Listing the level field puts it back.
+	f = buildLogsFrame(logs, keys, testView(rules, []string{"level"}, false))
+	if got := field(t, f, "message").At(0).(string); got != `level="INFO"` {
+		t.Errorf("line = %q", got)
+	}
+}
+
+func TestDecodeObject(t *testing.T) {
+	m, keys, err := decodeObject([]byte(` { "msg" : "a \"q\" \u4e2d" ,"b":"x","n":12,"z":null, "b":"y"}`), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(keys) != "[msg b n z]" || m["msg"] != `a "q" 中` || m["b"] != "y" || m["n"] != "12" || m["z"] != "" {
+		t.Errorf("keys %v map %v", keys, m)
+	}
+	if _, _, err := decodeObject([]byte(`{"a":"b"`), nil); err == nil {
+		t.Error("truncated object must fail")
+	}
+	if m, keys, err := decodeObject([]byte(`{}`), nil); err != nil || len(m) != 0 || len(keys) != 0 {
+		t.Errorf("empty: %v %v %v", m, keys, err)
+	}
+}
+
+func TestDecodeRowsSharesKeys(t *testing.T) {
+	raw := []json.RawMessage{[]byte(`{"a":"1","b":"2"}`), []byte(`{"a":"3","b":"4"}`), []byte(`{"a":"5","c":"6"}`)}
+	logs, keys, err := decodeRows(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if &keys[0][0] != &keys[1][0] || &keys[1][0] == &keys[2][0] {
+		t.Error("identical key lists must share one slice, different ones must not")
+	}
+	if fmt.Sprint(keys[2]) != "[a c]" || logs[2]["c"] != "6" || logs[1]["b"] != "4" {
+		t.Errorf("%v %v", keys, logs)
 	}
 }
