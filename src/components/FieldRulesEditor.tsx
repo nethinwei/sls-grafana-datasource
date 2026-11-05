@@ -93,6 +93,11 @@ export const RULE_SCHEMAS: Record<FieldRuleType, RuleSchema> = {
     ],
     blank: { type: 'template', to: '', template: '' },
   },
+  json: {
+    description: 'Flatten JSON objects into fields, as Loki | json: request → request_method, request_header_…',
+    params: [{ key: 'from', placeholder: 'field; empty = every JSON field', width: 32 }],
+    blank: { type: 'json' },
+  },
 };
 
 const TYPES: Array<ComboboxOption<FieldRuleType>> = (Object.keys(RULE_SCHEMAS) as FieldRuleType[]).map((t) => ({

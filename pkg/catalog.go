@@ -28,6 +28,8 @@ type catalogField struct {
 	SLSName string `json:"slsName,omitempty"`
 	// Rule is the rule type that produced or renamed the field.
 	Rule string `json:"rule,omitempty"`
+	// Expr is the SPL expression reading a flattened JSON field (no SLSName), for where filters.
+	Expr string `json:"expr,omitempty"`
 }
 
 type catalog struct {
@@ -51,6 +53,9 @@ func (c *catalog) byName(name string) (catalogField, bool) {
 type catalogBuilder struct {
 	timeField string
 	fields    map[string]*catalogField
+	// discovered is the rule type credited with fields that only show up when the rules run on
+	// sample logs (flattened JSON); empty when no rule produces such fields.
+	discovered string
 }
 
 func newCatalogBuilder(timeField string) *catalogBuilder {
@@ -77,6 +82,9 @@ func (c *catalogBuilder) remove(name string) {
 func (c *catalogBuilder) derive(name, ruleType string) {
 	c.fields[name] = &catalogField{Name: name, Rule: ruleType}
 }
+
+// discover asks buildCatalog to add the fields the rules produce on sample logs.
+func (c *catalogBuilder) discover(ruleType string) { c.discovered = ruleType }
 
 func (c *catalogBuilder) result(indexKnown bool) *catalog {
 	out := &catalog{IndexKnown: indexKnown, Fields: make([]catalogField, 0, len(c.fields))}
@@ -125,6 +133,15 @@ func buildCatalog(index *sls.Index, sample []map[string]string, view *logsView) 
 	}
 	for _, r := range view.rules {
 		r.describe(c)
+	}
+	if c.discovered != "" && len(sample) > 0 {
+		t, run := view.table(sample)
+		for name := range t.cols {
+			// Fields of the logs and those described by rules are known; the rest come from the rule.
+			if _, known := c.fields[name]; !known && !strings.HasPrefix(name, "__") && name != view.timeField {
+				c.fields[name] = &catalogField{Name: name, Rule: c.discovered, Expr: view.fieldExpr(name, run)}
+			}
+		}
 	}
 	return c.result(index != nil)
 }

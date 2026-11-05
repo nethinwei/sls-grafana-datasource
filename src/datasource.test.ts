@@ -130,6 +130,33 @@ describe('field catalog', () => {
     expect(toggle(ds, 'service.name', 'pay')).toBe('service: api');
   });
 
+  it('filters flattened JSON fields with SPL and skips Grafana-only fields', async () => {
+    const { ds } = await loaded();
+    const frame = {
+      fields: [],
+      length: 0,
+      meta: {
+        custom: {
+          grafanaOnlyFields: ['word'],
+          fieldExprs: { http_method: `json_extract_scalar("http", '$["method"]')` },
+        },
+      },
+    };
+    const toggleIn = (key: string, value: string) =>
+      ds.toggleQueryFilter(q, { type: 'FILTER_FOR', options: { key, value }, frame }).query;
+    expect(toggleIn('http_method', 'POST')).toBe(
+      `service: api | where json_extract_scalar("http", '$["method"]') = 'POST'`
+    );
+    expect(toggleIn('word', 'a')).toBe('service: api');
+    // Remembered from the result: Grafana does not always pass the frame.
+    expect(ds.toggleQueryFilter(q, { type: 'FILTER_OUT', options: { key: 'http_method', value: 'GET' } }).query).toBe(
+      `service: api | where coalesce(json_extract_scalar("http", '$["method"]'), '') != 'GET'`
+    );
+    expect(
+      ds.queryHasFilter({ refId: 'A', query: toggleIn('http_method', 'POST') }, { key: 'http_method', value: 'POST' })
+    ).toBe(true);
+  });
+
   it('uses SPL where for fields without an index', async () => {
     const { ds } = await loaded();
     expect(toggle(ds, 'level', 'ERROR')).toBe('service: api and level: "ERROR"');

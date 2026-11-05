@@ -64,7 +64,7 @@ describe('toggleWhereFilter', () => {
       'http_status',
       '200',
       true,
-      `level: ERROR | where "http_status" != '200'`,
+      `level: ERROR | where coalesce("http_status", '') != '200'`,
     ],
     ['*', 'msg', "it's", false, `* | where "msg" = 'it''s'`],
     [`* | where "a" = '1'`, 'a', '1', false, '*'],

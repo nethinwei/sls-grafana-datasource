@@ -93,7 +93,12 @@ Log context needs `__tag__:__pack_id__` and `__pack_meta__` on every row: the pl
 |---|---|
 | Level field | Level field (name after the rules), default `level` |
 | Time field | Field that becomes the log time, written by a `time` rule, default `timestamp` |
-| Line fields | Fields opening the log line, in order, e.g. `host.name`, `host.ip` to see where a log comes from. Fields produced by rules join the line only when listed here |
+| Line fields | Fields opening the log line, in an adjustable order, e.g. `service_name`, `host_name`. Listing `msg` last makes it the boundary: standard fields before it, the application's own fields after it. Fields missing from a log are skipped; fields produced by rules join the line only when listed here |
+| Hidden from line | Fields kept out of the line; they stay in the log details |
+
+Line values are quoted as in logfmt, with `"` and `\` escaped. Nested objects (slog groups, logged structs or maps; collectors store them as JSON text) and arrays are written as they are, unquoted, and pretty-printed in the log details.
+
+With a `json` rule, nested fields filter like any other field: by search when the field has a JSON index in SLS (`request.method: "POST"`), otherwise with SPL `| where json_extract_scalar("request", '$["method"]') = 'POST'`, like Loki's `| json | request_method="POST"`. Negative operators (`!=`, `!~`) treat a missing field as empty, as Loki does; regexes match the whole value.
 | Other fields in line | Append the other business fields (not `__` meta fields) in the order they were written, default on. The level field is shown by Grafana as the level and left out of the line unless listed in Line fields |
 | Field rules | Rules run in order |
 
@@ -107,8 +112,9 @@ Field rules:
 | `drop` | `__topic__` | Hide a field |
 | `default` | `deployment.environment` = `prod` | Value when the field is absent or empty |
 | `template` | `${service}/${env}` → `app` | New field from other fields, `$$` is a literal `$` |
+| `json` | `request` → `request_method`, `request_header_Content_Type` | Flattens nested JSON objects into fields, as Loki's `\| json`: keys joined with `_`, characters other than letters, digits and `_` become `_`, arrays and nulls skipped, `_extracted` appended on a name clash. Without from, every field holding a JSON object is flattened |
 
-Without configured rules the defaults apply: build `timestamp` from `__time__` and `__time_ns_part__`, then hide both. "Add OpenTelemetry renames" appends renames to `host.name`, `host.ip` and `log.file.path`. Except for `rename`, fields produced by rules exist only in Grafana and cannot be filtered on. `__tag__:__pack_id__` and `__pack_meta__` are needed by log context and cannot be renamed or dropped; invalid rules are skipped and listed by "Save & test".
+Without configured rules the defaults apply: build `timestamp` from `__time__` and `__time_ns_part__`, hide both, and flatten every nested object with `json`. "Add OpenTelemetry renames" appends renames to `host.name`, `host.ip` and `log.file.path`. Except for `rename`, fields produced by rules exist only in Grafana and cannot be filtered on. `__tag__:__pack_id__` and `__pack_meta__` are needed by log context and cannot be renamed or dropped; invalid rules are skipped and listed by "Save & test".
 
 Provisioning:
 
@@ -119,11 +125,13 @@ jsonData:
   logs:
     levelField: level
     line:
-      fields: [host.name, host.ip]
+      fields: [service_name, host.name, host.ip, msg]
+      exclude: [source]
     rules:
       - { type: time, from: __time__, nanos: __time_ns_part__, to: timestamp }
       - { type: drop, field: __time__ }
       - { type: drop, field: __time_ns_part__ }
+      - { type: json }
       - { type: rename, from: __tag__:__hostname__, to: host.name }
       - { type: rename, from: __tag__:__host_ip__, to: host.ip }
 ```

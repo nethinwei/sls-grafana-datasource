@@ -25,29 +25,20 @@ type adhocFilter struct {
 
 // applyAdhocFilters returns the statement with the filters added and a notice for each filter that
 // could not be applied. cat may be nil (catalog unavailable): every field is then assumed indexed.
-func applyAdhocFilters(query string, filters []adhocFilter, view *logsView, cat *catalog) (string, []string) {
+func applyAdhocFilters(query string, filters []adhocFilter, view *logsView, cat *catalog, learned learnedFields) (string, []string) {
 	if len(filters) == 0 {
 		return query, nil
 	}
 	sqlStatement := isSQL(query)
 	var search, where, skipped []string
 	for _, f := range filters {
-		if view.derived[f.Key] {
+		target, ok := filterTarget(f.Key, view, cat, learned)
+		if !ok {
 			skipped = append(skipped, fmt.Sprintf("%s is produced by a field rule and cannot be filtered in SLS", f.Key))
 			continue
 		}
-		name := f.Key
-		if sls, ok := view.slsNames[f.Key]; ok {
-			name = sls
-		}
-		indexed := true
-		if cat != nil {
-			if cf, ok := cat.byName(f.Key); ok && cf.Indexed != nil {
-				indexed = *cf.Indexed
-			}
-		}
-		if indexed {
-			if c := searchCondition(name, f); c != "" {
+		if target.indexed {
+			if c := searchCondition(target.name, f); c != "" {
 				search = append(search, c)
 				continue
 			}
@@ -59,7 +50,7 @@ func applyAdhocFilters(query string, filters []adhocFilter, view *logsView, cat 
 			skipped = append(skipped, fmt.Sprintf("%s has no index and cannot be filtered in an SQL statement", f.Key))
 			continue
 		}
-		if c := whereCondition(name, f); c != "" {
+		if c := whereCondition(target.expr, f); c != "" {
 			where = append(where, c)
 		} else {
 			skipped = append(skipped, fmt.Sprintf("operator %s is not supported", f.Operator))
@@ -72,6 +63,49 @@ func applyAdhocFilters(query string, filters []adhocFilter, view *logsView, cat 
 		query += " | where " + strings.Join(where, " and ")
 	}
 	return query, skipped
+}
+
+// filterField is how SLS reaches a field shown in Grafana.
+type filterField struct {
+	name    string // SLS field for search; empty for flattened JSON fields
+	expr    string // SPL expression for where: the quoted field, or json_extract_scalar(...)
+	indexed bool   // search works
+}
+
+// learnedFields reports what recent query results said about a field the catalog does not know:
+// known with an SPL expression (flattened JSON), or known without one (exists only in Grafana).
+type learnedFields func(name string) (expr string, known bool)
+
+// filterTarget returns how SLS reaches a field shown in Grafana; ok is false for fields that exist
+// only in Grafana. The catalog comes first (index and sample); then what recent results produced
+// (flattened JSON keys outside the sample); then the rules' renames, with fields assumed indexed.
+func filterTarget(key string, view *logsView, cat *catalog, learned learnedFields) (filterField, bool) {
+	field := func(name string, indexed bool) (filterField, bool) {
+		return filterField{name: name, expr: quoteIdentifier(name), indexed: indexed}, true
+	}
+	if cat != nil {
+		if cf, found := cat.byName(key); found {
+			switch {
+			case cf.SLSName != "":
+				return field(cf.SLSName, cf.Indexed == nil || *cf.Indexed)
+			case cf.Expr != "":
+				return filterField{expr: cf.Expr}, true
+			}
+			return filterField{}, false
+		}
+	}
+	if learned != nil {
+		if expr, known := learned(key); known {
+			return filterField{expr: expr}, expr != ""
+		}
+	}
+	if view.derived[key] {
+		return filterField{}, false
+	}
+	if sls, renamed := view.slsNames[key]; renamed {
+		return field(sls, true)
+	}
+	return field(key, true)
 }
 
 func quoteSearchValue(v string) string {
@@ -125,9 +159,16 @@ func searchCondition(key string, f adhocFilter) string {
 
 func splString(v string) string { return "'" + strings.ReplaceAll(v, "'", "''") + "'" }
 
-// whereCondition expresses a filter as an SPL where condition; "" when it cannot.
-func whereCondition(key string, f adhocFilter) string {
-	col := quoteIdentifier(key)
+// whereCondition expresses a filter as an SPL where condition on col (a quoted field or an
+// expression); "" when it cannot.
+//
+// A missing field is null in SPL, which no comparison matches; negative operators compare it as
+// "" so that, as in Loki, logs without the field pass `!=`.
+func whereCondition(col string, f adhocFilter) string {
+	switch f.Operator {
+	case "!=", "!=|", "!~":
+		col = "coalesce(" + col + ", '')"
+	}
 	switch f.Operator {
 	case "=", "!=":
 		return col + " " + f.Operator + " " + splString(f.Value)
@@ -142,10 +183,13 @@ func whereCondition(key string, f adhocFilter) string {
 			op = " not in "
 		}
 		return col + op + "(" + strings.Join(quoted, ", ") + ")"
-	case "=~":
-		return "regexp_like(" + col + ", " + splString(f.Value) + ")"
-	case "!~":
-		return "not regexp_like(" + col + ", " + splString(f.Value) + ")"
+	case "=~", "!~":
+		// Anchored, as Grafana's and Loki's regex matchers match the whole value.
+		cond := "regexp_like(" + col + ", " + splString("^(?:"+f.Value+")$") + ")"
+		if f.Operator == "!~" {
+			return "not " + cond
+		}
+		return cond
 	case "<", ">", "<=", ">=":
 		if _, err := strconv.ParseFloat(f.Value, 64); err == nil {
 			return "cast(" + col + " as double) " + f.Operator + " " + f.Value

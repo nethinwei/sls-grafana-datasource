@@ -95,7 +95,12 @@
 |---|---|
 | Level field | 级别字段（规则处理之后的名字），默认 `level` |
 | Time field | 作为日志时间的字段，由 `time` 规则写入，默认 `timestamp` |
-| Line fields | 日志行开头依次显示的字段，例如 `host.name`、`host.ip`，用来一眼看出日志来自哪台机器。规则产生的字段只有列在这里才进入日志行 |
+| Line fields | 日志行开头依次显示的字段，可调整顺序，例如 `service_name`、`host_name`。把 `msg` 列在最后可以让它成为分界线：前面是标准字段，后面是应用自己写的字段。日志里没有的字段自动跳过；规则产生的字段只有列在这里才进入日志行 |
+| Hidden from line | 不进日志行的字段，仍然显示在日志详情里 |
+
+日志行的值按 logfmt 写法加引号，值里的 `"` 和 `\` 会转义。嵌套对象（slog 的 Group、记录的结构体或 map；采集端把它存成一段 JSON 文本）和数组原样输出、不加引号，日志详情中会格式化显示。
+
+配置 `json` 规则后，嵌套字段可以像普通字段一样筛选：字段在 SLS 中建了 JSON 索引时用检索（`request.method: "POST"`）；没有索引时用 SPL `| where json_extract_scalar("request", '$["method"]') = 'POST'`，效果等同 Loki 的 `| json | request_method="POST"`。否定条件（`!=`、`!~`）对缺少该字段的日志按空值处理，与 Loki 一致；正则匹配整个值。
 | Other fields in line | 是否在后面接着显示其余业务字段（不含 `__` 开头的元数据），按日志写入时的顺序，默认开。级别字段已由 Grafana 单独显示，不重复放进日志行，需要时可列入 Line fields |
 | Field rules | 按顺序执行的字段规则 |
 
@@ -109,8 +114,9 @@
 | `drop` | `__topic__` | 隐藏字段 |
 | `default` | `deployment.environment` = `prod` | 字段缺失或为空时的取值 |
 | `template` | `${service}/${env}` → `app` | 由其他字段拼出新字段，`$$` 表示 `$` |
+| `json` | `request` → `request_method`、`request_header_Content_Type` | 把嵌套的 JSON 对象展开成字段，规则同 Loki 的 `\| json`：键名用 `_` 连接，字母、数字、`_` 以外的字符换成 `_`，数组和 null 跳过，与已有字段重名时加 `_extracted`。不填 from 时展开所有值为 JSON 对象的字段 |
 
-没有配置规则时使用默认规则：用 `__time__` 和 `__time_ns_part__` 合成 `timestamp`，再隐藏这两个字段。配置页的「Add OpenTelemetry renames」会追加 `host.name`、`host.ip`、`log.file.path` 三条改名规则。除 `rename` 外，规则产生的字段只存在于 Grafana，不能用于筛选。`__tag__:__pack_id__` 与 `__pack_meta__` 是日志上下文需要的字段，不能改名或隐藏；无效的规则会被跳过，并在「Save & test」中列出。
+没有配置规则时使用默认规则：用 `__time__` 和 `__time_ns_part__` 合成 `timestamp`，隐藏这两个字段，再用 `json` 展开所有嵌套对象。配置页的「Add OpenTelemetry renames」会追加 `host.name`、`host.ip`、`log.file.path` 三条改名规则。除 `rename` 外，规则产生的字段只存在于 Grafana，不能用于筛选。`__tag__:__pack_id__` 与 `__pack_meta__` 是日志上下文需要的字段，不能改名或隐藏；无效的规则会被跳过，并在「Save & test」中列出。
 
 用配置文件创建数据源时：
 
@@ -121,11 +127,13 @@ jsonData:
   logs:
     levelField: level
     line:
-      fields: [host.name, host.ip]
+      fields: [service_name, host.name, host.ip, msg]
+      exclude: [source]
     rules:
       - { type: time, from: __time__, nanos: __time_ns_part__, to: timestamp }
       - { type: drop, field: __time__ }
       - { type: drop, field: __time_ns_part__ }
+      - { type: json }
       - { type: rename, from: __tag__:__hostname__, to: host.name }
       - { type: rename, from: __tag__:__host_ip__, to: host.ip }
 ```

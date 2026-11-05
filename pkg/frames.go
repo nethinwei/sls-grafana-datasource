@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"hash/fnv"
 	"math"
@@ -24,7 +25,7 @@ import (
 // another name it is copied to "detected_level".
 func buildLogsFrame(logs []map[string]string, keys [][]string, f *logsView) *data.Frame {
 	n := len(logs)
-	t, times := f.table(logs)
+	t, run := f.table(logs)
 
 	names := make([]string, 0, len(t.cols))
 	for k := range t.cols {
@@ -35,7 +36,8 @@ func buildLogsFrame(logs []map[string]string, keys [][]string, f *logsView) *dat
 
 	// The line: the configured line fields first, then (rest) the log's own fields in the order
 	// they were written. Meta fields (__*) and fields produced by rules join only when listed; the
-	// level field is shown by Grafana as the level, so it is left out unless listed.
+	// level field is shown by Grafana as the level, so it is left out unless listed. Excluded
+	// fields never join (they stay in the log details).
 	listed := make(map[string]bool, len(f.lineFields))
 	var fixed []lineColumn
 	for _, k := range f.lineFields {
@@ -57,7 +59,7 @@ func buildLogsFrame(logs []map[string]string, keys [][]string, f *logsView) *dat
 		if shown, renamed := f.shownNames[key]; renamed {
 			name = shown
 		}
-		if c := t.cols[name]; c != nil && !strings.HasPrefix(key, "__") && !listed[name] && name != f.levelField {
+		if c := t.cols[name]; c != nil && !strings.HasPrefix(key, "__") && !listed[name] && name != f.levelField && !f.lineExclude[name] {
 			if lc = byName[name]; lc == nil {
 				lc = &lineColumn{name: name, col: c, row: -1}
 				byName[name] = lc
@@ -67,7 +69,7 @@ func buildLogsFrame(logs []map[string]string, keys [][]string, f *logsView) *dat
 		return lc
 	}
 
-	stamps := rowTimestamps(logs, t, times, f.timeField)
+	stamps := rowTimestamps(logs, t, run.times, f.timeField)
 	lines := make([]string, n)
 	ids := make([]string, n)
 	pack, meta := t.cols["__tag__:__pack_id__"], t.cols["__pack_meta__"]
@@ -127,9 +129,31 @@ func buildLogsFrame(logs []map[string]string, keys [][]string, f *logsView) *dat
 			frame.Fields = append(frame.Fields, data.NewField("detected_level", nil, c.values))
 		}
 	}
+	// How field filters (➕ / ➖, dashboard filters) reach fields the rules produced: flattened JSON
+	// fields through an SPL expression, other produced fields not at all (they exist only in
+	// Grafana). Fields of the logs and renamed ones are filtered by name.
+	var grafanaOnly []string
+	exprs := map[string]string{}
+	for _, k := range names {
+		if e := f.fieldExpr(k, run); e != "" {
+			exprs[k] = e
+		} else if f.derived[k] {
+			grafanaOnly = append(grafanaOnly, k)
+		}
+	}
 	frame.Meta = &data.FrameMeta{PreferredVisualization: data.VisTypeLogs}
+	if len(grafanaOnly) > 0 || len(exprs) > 0 {
+		frame.Meta.Custom = map[string]any{grafanaOnlyFieldsKey: grafanaOnly, fieldExprsKey: exprs}
+	}
 	return frame
 }
+
+// Frame meta keys: the fields SLS cannot filter on, and the SPL expressions of flattened JSON
+// fields.
+const (
+	grafanaOnlyFieldsKey = "grafanaOnlyFields"
+	fieldExprsKey        = "fieldExprs"
+)
 
 type lineColumn struct {
 	name string
@@ -147,9 +171,8 @@ func (lc *lineColumn) append(buf []byte, i int) []byte {
 		buf = append(buf, ' ')
 	}
 	buf = append(buf, lc.name...)
-	buf = append(buf, '=', '"')
-	buf = appendQuoted(buf, lc.col.values[i])
-	return append(buf, '"')
+	buf = append(buf, '=')
+	return appendValue(buf, lc.col.values[i])
 }
 
 func sortedKeys(m map[string]string) []string {
@@ -184,19 +207,25 @@ func rowTimestamps(logs []map[string]string, t *table, times rowTimes, timeField
 	return out
 }
 
-// appendQuoted appends v with double quotes replaced, so the line stays parseable as key="value".
-func appendQuoted(buf []byte, v string) []byte {
-	if strings.IndexByte(v, '"') < 0 {
+// appendValue writes a line value: JSON objects and arrays (nested fields, which collectors store
+// as JSON text) as they are, so they stay readable and valid JSON; other values quoted, with " and
+// \ escaped as in logfmt.
+func appendValue(buf []byte, v string) []byte {
+	if n := len(v); n >= 2 && (v[0] == '{' && v[n-1] == '}' || v[0] == '[' && v[n-1] == ']') && json.Valid([]byte(v)) {
 		return append(buf, v...)
 	}
-	for i := 0; i < len(v); i++ {
-		if v[i] == '"' {
-			buf = append(buf, '\'')
-		} else {
+	buf = append(buf, '"')
+	if strings.IndexByte(v, '"') < 0 && strings.IndexByte(v, '\\') < 0 {
+		buf = append(buf, v...)
+	} else {
+		for i := 0; i < len(v); i++ {
+			if v[i] == '"' || v[i] == '\\' {
+				buf = append(buf, '\\')
+			}
 			buf = append(buf, v[i])
 		}
 	}
-	return buf
+	return append(buf, '"')
 }
 
 // hashID identifies a row without pack data (deduplication, permalinks): a hash of time and line

@@ -4,6 +4,7 @@ import React from 'react';
 
 import { DEFAULT_TIME_FIELD, type LogsConfig, type SLSDataSourceOptions, type SLSSecureJsonData } from '../types';
 import { FieldRulesEditor } from './FieldRulesEditor';
+import { LineFieldsEditor } from './LineFieldsEditor';
 
 type Props = DataSourcePluginOptionsEditorProps<SLSDataSourceOptions, SLSSecureJsonData>;
 
@@ -22,7 +23,7 @@ export function ConfigEditor({ options, onOptionsChange }: Props) {
   };
   const setLine = (patch: NonNullable<LogsConfig['line']>) => {
     const line = { ...logs.line, ...patch };
-    setLogs({ line: line.fields?.length || line.rest === false ? line : undefined });
+    setLogs({ line: line.fields?.length || line.exclude?.length || line.rest === false ? line : undefined });
   };
   const setSecret = (key: keyof SLSSecureJsonData, value: string) =>
     onOptionsChange({ ...options, secureJsonData: { ...secure, [key]: value } });
@@ -148,13 +149,19 @@ export function ConfigEditor({ options, onOptionsChange }: Props) {
       </Field>
       <Field
         label="Line fields"
-        description="Fields opening the log line, in this order, e.g. host.name and host.ip to see where a log comes from. Fields produced by rules appear in the line only when listed here."
+        description="Fields opening the log line, in this order. Listing msg last makes it the boundary: standard fields (service, host, trace) before it, the application's own fields after it. Fields missing from a log are skipped; fields produced by rules appear only when listed here."
       >
+        <LineFieldsEditor
+          value={logs.line?.fields ?? []}
+          onChange={(fields) => setLine({ fields: fields.length ? fields : undefined })}
+        />
+      </Field>
+      <Field label="Hidden from line" description="Fields never shown in the log line; they stay in the log details.">
         <TagsInput
           width={60}
           placeholder="field name, Enter to add"
-          tags={logs.line?.fields ?? []}
-          onChange={(fields) => setLine({ fields: fields.length ? fields : undefined })}
+          tags={logs.line?.exclude ?? []}
+          onChange={(exclude) => setLine({ exclude: exclude.length ? exclude : undefined })}
         />
       </Field>
       <Field
