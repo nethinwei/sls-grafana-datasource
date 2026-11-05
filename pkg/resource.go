@@ -1,290 +1,75 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
-	"io/ioutil"
 	"net/http"
 	"net/url"
-	"regexp"
-	"strings"
 	"time"
 
-	sls "github.com/aliyun/aliyun-log-go-sdk"
-
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
-	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
 	"github.com/grafana/grafana-plugin-sdk-go/backend/resource/httpadapter"
 )
 
-func newResourceHandler(ds *SlsDatasource) backend.CallResourceHandler {
+// Resource routes used by the query editor. Response shapes are kept from plugin 2.x so the current
+// frontend keeps working.
+func newResourceHandler(ds *datasource) backend.CallResourceHandler {
 	mux := http.NewServeMux()
-
-	// register route
-	mux.HandleFunc("/api/gotoSLS", ds.gotoSLS)
-	mux.HandleFunc("/api/version", ds.serveVersion)
-	mux.HandleFunc("/api/getLogstoreList", ds.getLogstoreList)
-
+	mux.HandleFunc("/api/getLogstoreList", ds.handleLogstoreList)
+	mux.HandleFunc("/api/gotoSLS", ds.handleGotoSLS)
 	return httpadapter.New(mux)
 }
 
-func (ds *SlsDatasource) serveVersion(w http.ResponseWriter, r *http.Request) {
-	// Handle query request...
+// handleLogstoreList lists logstores of the configured project. Least-privilege AccessKeys usually
+// cannot list logstores (log:ListLogStores is project level); then the default logstore is offered.
+func (ds *datasource) handleLogstoreList(w http.ResponseWriter, r *http.Request) {
+	if ds.cfg == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"data": []string{}, "message": "data source is not configured"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	list, err := call(ctx, func() ([]string, error) { return ds.client.ListLogStoreV2(ds.cfg.Project, 0, 500, "None") })
+	if err != nil {
+		var fallback []string
+		if ds.cfg.LogStore != "" {
+			fallback = []string{ds.cfg.LogStore}
+		}
+		_, _, msg := classifyError(err)
+		writeJSON(w, http.StatusOK, map[string]any{"data": fallback, "res": fallback, "message": msg})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": list, "res": list, "message": ""})
 }
 
-type ListLogstoresData struct {
-	Project       string
-	TelemetryType string
-}
-
-func (ds *SlsDatasource) getLogstoreList(w http.ResponseWriter, r *http.Request) {
-	response := map[string]interface{}{
-		"data":    []map[string]interface{}{}, // 定义 data 为一个任意类型的对象数组
-		"res":     nil,
-		"message": "",
-	}
-
-	config, err := LoadSettings(httpadapter.PluginConfigFromContext(r.Context()))
-	if err != nil {
-		response["message"] = err.Error()
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	provider := sls.NewStaticCredentialsProvider(config.AccessKeyId, config.AccessKeySecret, "")
-	client := sls.CreateNormalInterfaceV2(config.Endpoint, provider)
-	client.SetUserAgent("grafana-go")
-
-	if config.Region != "" {
-		client.SetAuthVersion(sls.AuthV4)
-		client.SetRegion(config.Region)
-	}
-
-	body, err := ioutil.ReadAll(r.Body)
-	if err != nil {
-		response["message"] = err.Error()
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	// 解析request JSON 数据
-	var data ListLogstoresData
-	if err := json.Unmarshal(body, &data); err != nil {
-		response["message"] = err.Error()
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	log.DefaultLogger.Debug("getBODY", "body", body, "bodyData", data)
-
-	project, err := client.GetProject(data.Project)
-	if err != nil {
-		response["message"] = err.Error()
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	// 拿当前 Project 的信息
-	list, err := project.ListLogStoreV2(0, 500, data.TelemetryType)
-	if err != nil {
-		response["message"] = err.Error()
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	response["data"] = list
-	response["res"] = list
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(response)
-	log.DefaultLogger.Debug("get logstore success.")
-}
-
-type Data struct {
-	Encoding string `json:"encoding"`
+type gotoSLSRequest struct {
+	Encoding string `json:"encoding"` // query string built by the frontend (queryString, time range, ...)
 	Logstore string `json:"logstore"`
-	Type     string `json:"type"`
 }
 
-func (ds *SlsDatasource) gotoSLS(w http.ResponseWriter, r *http.Request) {
-
-	response := map[string]interface{}{
-		"message": "",
-		"err":     "",
-		"url":     "",
-		// "policy":  "",
-	}
-
-	config, err := LoadSettings(httpadapter.PluginConfigFromContext(r.Context()))
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+// handleGotoSLS returns the SLS console URL for the current query. The user signs in to the console
+// with their own Alibaba Cloud account.
+func (ds *datasource) handleGotoSLS(w http.ResponseWriter, r *http.Request) {
+	if ds.cfg == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"message": "data source is not configured"})
 		return
 	}
-
-	ak := config.AccessKeyId
-	sk := config.AccessKeySecret
-	arn := config.RoleArn
-	prj := config.Project
-	logstore := config.LogStore
-	international := config.International
-
-	body, err := ioutil.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+	var req gotoSLSRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"message": err.Error()})
 		return
 	}
-
-	// 解析request JSON 数据
-	var data Data
-	if err := json.Unmarshal(body, &data); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
+	logstore := req.Logstore
+	if logstore == "" {
+		logstore = ds.cfg.LogStore
 	}
+	u := "https://sls.console." + ds.cfg.consoleDomain() + ".com/lognext/project/" +
+		url.PathEscape(ds.cfg.Project) + "/logsearch/" + url.PathEscape(logstore) + "?" + req.Encoding
+	writeJSON(w, http.StatusOK, map[string]any{"url": u, "message": "", "err": ""})
+}
 
-	logstoreType := "/logsearch/"
-
-	if data.Type == "metricsql" || data.Type == "metricstore" {
-		logstoreType = "/metric/"
-	}
-
-	if data.Logstore != "" {
-		logstore = data.Logstore
-	}
-
-	pattern := `^acs:ram::\d+:role\/[^\/]+$`
-	regex, err := regexp.Compile(pattern)
-	if err != nil {
-		return
-	}
-
-	normalJump := false
-
-	if len(arn) == 0 {
-		normalJump = true
-	} else {
-		if !regex.MatchString(arn) {
-			response["err"] = "regexCheckError"
-			response["message"] = "roleArn 不符合格式，请检查。"
-			normalJump = true
-		}
-	}
-
-	if !normalJump {
-		roleName := strings.Split(arn, "/")[1]
-		_, err2 := roleCheck(ak, sk, roleName)
-		if err2 != nil {
-			response["err"] = "roleCheckError"
-			response["message"] = err2.Error()
-			// http.Error(w, err2.Error(), http.StatusBadRequest)
-			// return
-			normalJump = true
-		}
-		// response["policy"] = p
-	}
-
-	baseDomain := "aliyun"
-	if international {
-		baseDomain = "alibabacloud"
-	}
-
-	if !normalJump {
-		client := NewClient(ak, sk, arn, "default")
-		stsResp, err := client.AssumeRole(900)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			log.DefaultLogger.Error(err.Error())
-			// response["err"] = err.Error()
-			// response["message"] = err.Error()
-			// w.Header().Set("Content-Type", "application/json")
-			// w.WriteHeader(http.StatusInternalServerError)
-			// json.NewEncoder(w).Encode(response)
-			return
-		}
-		id := stsResp.Credentials.AccessKeyId
-		secret := stsResp.Credentials.AccessKeySecret
-		token := stsResp.Credentials.SecurityToken
-
-		// 使用STS Token换取控制台Signin Token
-		SigninResp, err := getSigninToken(id, secret, token, baseDomain)
-		if err != nil {
-			panic(err)
-		}
-		signinToken := SigninResp.SigninToken
-
-		// 生成登录链接
-		loginUrl := "http://www." + baseDomain + ".com"
-		// destination := "http://sls4service.console.aliyun.com"
-		destination := "http://sls4service.console." + baseDomain + ".com/lognext/project/" + prj + logstoreType + logstore + "?isShare=true&hideTopbar=true&hideSidebar=true&ignoreTabLocalStorage=true&" + data.Encoding
-		url, err := genSigninUrl(signinToken, loginUrl, destination, baseDomain)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			log.DefaultLogger.Error(err.Error())
-			return
-		}
-
-		response["url"] = url
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(response)
-		log.DefaultLogger.Debug("Goto SLS with STS success.", url)
-		return
-	}
-	url := "https://sls.console." + baseDomain + ".com/lognext/project/" + prj + logstoreType + logstore + "?" + data.Encoding
-	response["url"] = url
+func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(response)
-	log.DefaultLogger.Debug("Goto SLS with Normal jump success.", url)
-}
-
-func getSigninToken(id string, secret string, token string, baseDomain string) (*SigninResponse, error) {
-	urlStr := "https://signin." + baseDomain + ".com/federation?Action=GetSigninToken"
-	urlStr += "&AccessKeyId=" + id
-	urlStr += "&AccessKeySecret=" + secret
-	urlStr += "&SecurityToken=" + url.QueryEscape(token)
-	urlStr += "&TicketType=mini"
-
-	client := newPublicOnlyHTTPClient(30 * time.Second)
-
-	res, err := client.Get(urlStr)
-	if err != nil {
-		return nil, err
-	}
-	body, err := ioutil.ReadAll(res.Body)
-	if err != nil {
-		return nil, err
-	}
-	// fmt.Println("SigninToken json:", string(body))
-	resp := SigninResponse{}
-	err = json.Unmarshal(body, &resp)
-	if err != nil {
-		return nil, err
-	}
-	return &resp, nil
-}
-
-func genSigninUrl(signinToken string, loginUrl string, destination string, baseDomain string) (string, error) {
-	urlStr := "https://signin." + baseDomain + ".com/federation?Action=Login"
-	urlStr += "&LoginUrl=" + url.QueryEscape(loginUrl)
-	urlStr += "&Destination=" + url.QueryEscape(destination)
-	urlStr += "&SigninToken=" + url.QueryEscape(signinToken)
-	client := &http.Client{
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
-	res, err := client.Get(urlStr)
-	if err != nil {
-		return "", err
-	}
-	location, err := res.Location()
-	if err != nil {
-		return "", err
-	}
-	locationUrl := location.String()
-	return locationUrl, nil
-}
-
-type SigninResponse struct {
-	SigninToken string
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
 }
