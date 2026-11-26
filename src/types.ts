@@ -48,6 +48,10 @@ export interface SLSDataSourceOptions extends DataSourceJsonData {
   logstore?: string;
   /** Region ID such as cn-hangzhou; when set, requests are signed with AuthV4. */
   region?: string;
+  /** How requests are signed: an AccessKey (default) or the RAM role of the ECS instance Grafana runs on. */
+  authType?: 'accessKey' | 'ecsRamRole';
+  /** ECS RAM role name, for authType ecsRamRole. */
+  ramRoleName?: string;
   /** Open the console on alibabacloud.com instead of aliyun.com. */
   international?: boolean;
   /** Time zone of date-time strings returned by SLS SQL. Default Asia/Shanghai (UTC+8). */

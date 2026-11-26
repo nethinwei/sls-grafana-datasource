@@ -7,15 +7,21 @@ import (
 	"strings"
 	"time"
 
+	sls "github.com/aliyun/aliyun-log-go-sdk"
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 )
 
 // settings is the data source configuration: jsonData plus decrypted secureJsonData.
 type settings struct {
-	Endpoint      string // data source URL, e.g. cn-hangzhou.log.aliyuncs.com
-	Project       string `json:"project"`
-	LogStore      string `json:"logstore"`
-	Region        string `json:"region"`        // set to sign requests with AuthV4
+	Endpoint string // data source URL, e.g. cn-hangzhou.log.aliyuncs.com
+	Project  string `json:"project"`
+	LogStore string `json:"logstore"`
+	Region   string `json:"region"` // set to sign requests with AuthV4
+	// AuthType is how requests are signed: "accessKey" (default) with the AccessKey in
+	// secureJsonData, or "ecsRamRole" with temporary credentials of the RAM role attached to the
+	// ECS instance Grafana runs on (fetched from the instance metadata service and refreshed).
+	AuthType      string `json:"authType"`
+	RAMRoleName   string `json:"ramRoleName"`   // ECS RAM role name, for AuthType "ecsRamRole"
 	International bool   `json:"international"` // console on alibabacloud.com instead of aliyun.com
 	// SQLTimeZone is the zone of date-time strings returned by SLS SQL (timestamp columns,
 	// from_unixtime, date_format), which carry no offset. SLS uses UTC+8 by default.
@@ -61,6 +67,11 @@ type logsConfig struct {
 	} `json:"line"`
 }
 
+const (
+	authAccessKey  = "accessKey"
+	authECSRAMRole = "ecsRamRole"
+)
+
 func loadSettings(s backend.DataSourceInstanceSettings) (*settings, error) {
 	cfg := &settings{}
 	if len(s.JSONData) > 0 {
@@ -69,6 +80,7 @@ func loadSettings(s backend.DataSourceInstanceSettings) (*settings, error) {
 		}
 	}
 	cfg.Endpoint = strings.TrimSpace(s.URL)
+	cfg.RAMRoleName = strings.TrimSpace(cfg.RAMRoleName)
 	// The SDK defaults to plain http; AccessKey-signed requests and log data go over https unless
 	// the endpoint names http explicitly.
 	if cfg.Endpoint != "" && !strings.Contains(cfg.Endpoint, "://") {
@@ -99,7 +111,11 @@ func loadSettings(s backend.DataSourceInstanceSettings) (*settings, error) {
 		return nil, errors.New("endpoint (URL) is not configured")
 	case cfg.Project == "":
 		return nil, errors.New("project is not configured")
-	case cfg.AccessKeyID == "" || cfg.AccessKeySecret == "":
+	case cfg.AuthType != "" && cfg.AuthType != authAccessKey && cfg.AuthType != authECSRAMRole:
+		return nil, fmt.Errorf("unknown authentication type %q", cfg.AuthType)
+	case cfg.AuthType == authECSRAMRole && cfg.RAMRoleName == "":
+		return nil, errors.New("ECS RAM role name is not configured")
+	case cfg.AuthType != authECSRAMRole && (cfg.AccessKeyID == "" || cfg.AccessKeySecret == ""):
 		return nil, errors.New("AccessKey is not configured")
 	}
 	return cfg, nil
@@ -111,4 +127,13 @@ func (s *settings) consoleDomain() string {
 		return "alibabacloud"
 	}
 	return "aliyun"
+}
+
+// credentials signs requests: the ECS instance's RAM role (temporary credentials, refreshed by the
+// SDK before they expire) or the configured AccessKey.
+func (s *settings) credentials() sls.CredentialsProvider {
+	if s.AuthType == authECSRAMRole {
+		return sls.NewEcsRamRoleCredentialsProvider(s.RAMRoleName)
+	}
+	return sls.NewStaticCredentialsProvider(s.AccessKeyID, s.AccessKeySecret, "")
 }

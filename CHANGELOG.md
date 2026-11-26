@@ -1,5 +1,12 @@
 # Changelog
 
+# v0.2.0 (2026-11-26)
+
+- 新增认证方式 **ECS RAM 角色**（`jsonData.authType: ecsRamRole`、`jsonData.ramRoleName`）：Grafana 部署在阿里云 ECS 上时，使用实例绑定的 RAM 角色访问 SLS，临时凭据从 ECS 元数据服务获取、过期前由 SDK 自动刷新，不需要保存 AccessKey。默认仍是 AccessKey，已有数据源不受影响。
+- 配置页「Authentication」可选 AccessKey 或 ECS RAM role；选 RAM 角色时只需填写角色名。
+- 配置项校验：RAM 角色缺少角色名、AccessKey 方式缺少 AccessKey、认证方式取值未知时，健康检查直接给出原因。
+- 文档：README 增加「ECS RAM 角色」（前提条件：能访问 ECS 元数据服务、实例不能是强制加固模式）与两种认证方式的 provisioning 示例。
+
 # v0.1.0 (2026-11-05)
 
 首个独立版本。衍生自阿里云官方插件 aliyun/aliyun-log-grafana-datasource-plugin 2.39.2，面向 Grafana 13.2 重写并独立维护。官方插件 2.39.2 及以前的版本记录见其仓库的 [CHANGELOG](https://github.com/aliyun/aliyun-log-grafana-datasource-plugin/blob/master/CHANGELOG.md)。
