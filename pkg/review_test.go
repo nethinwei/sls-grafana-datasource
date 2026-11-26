@@ -59,6 +59,35 @@ func TestEndpointDefaultsToHTTPS(t *testing.T) {
 	}
 }
 
+func TestAuthSettings(t *testing.T) {
+	load := func(js map[string]string, secure map[string]string) (*settings, error) {
+		jsonData, _ := json.Marshal(js)
+		return loadSettings(backend.DataSourceInstanceSettings{URL: "cn-hangzhou.log.aliyuncs.com", JSONData: jsonData, DecryptedSecureJSONData: secure})
+	}
+	ak := map[string]string{"accessKeyId": "a", "accessKeySecret": "b"}
+	if _, err := load(map[string]string{"project": "p"}, nil); err == nil {
+		t.Error("the default authentication needs an AccessKey")
+	}
+	if cfg, err := load(map[string]string{"project": "p", "authType": "accessKey"}, ak); err != nil {
+		t.Error(err)
+	} else if _, ok := cfg.credentials().(*sls.StaticCredentialsProvider); !ok {
+		t.Errorf("accessKey signs with the AccessKey: %T", cfg.credentials())
+	}
+	if _, err := load(map[string]string{"project": "p", "authType": "ecsRamRole", "ramRoleName": " "}, nil); err == nil {
+		t.Error("ecsRamRole needs a role name")
+	}
+	cfg, err := load(map[string]string{"project": "p", "authType": "ecsRamRole", "ramRoleName": " role-a "}, nil)
+	if err != nil || cfg.RAMRoleName != "role-a" {
+		t.Fatalf("ecsRamRole needs no AccessKey: %v %+v", err, cfg)
+	}
+	if _, ok := cfg.credentials().(*sls.StaticCredentialsProvider); ok {
+		t.Error("ecsRamRole must not sign with a static AccessKey")
+	}
+	if _, err := load(map[string]string{"project": "p", "authType": "sts"}, ak); err == nil {
+		t.Error("an unknown authentication type is an error")
+	}
+}
+
 func TestContextKeepsOrder(t *testing.T) {
 	sec := time.Unix(1700000000, 0)
 	f := data.NewFrame("logs", data.NewField("time", nil, []time.Time{sec, sec, sec}))

@@ -1,6 +1,6 @@
 {
   "name": "nethinwei-sls-datasource",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Community Grafana data source for Alibaba Cloud Log Service (SLS)",
   "scripts": {
     "build": "webpack -c ./.config/webpack/webpack.config.ts --env production",

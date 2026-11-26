@@ -1,5 +1,5 @@
 import type { DataSourcePluginOptionsEditorProps } from '@grafana/data';
-import { Field, Input, SecretInput, Stack, Switch, TagsInput, Text, TextLink } from '@grafana/ui';
+import { Field, Input, RadioButtonGroup, SecretInput, Stack, Switch, TagsInput, Text, TextLink } from '@grafana/ui';
 import React from 'react';
 
 import { DEFAULT_TIME_FIELD, type LogsConfig, type SLSDataSourceOptions, type SLSSecureJsonData } from '../types';
@@ -11,6 +11,7 @@ type Props = DataSourcePluginOptionsEditorProps<SLSDataSourceOptions, SLSSecureJ
 export function ConfigEditor({ options, onOptionsChange }: Props) {
   const { jsonData, secureJsonFields } = options;
   const secure = options.secureJsonData ?? {};
+  const ramRole = jsonData.authType === 'ecsRamRole';
 
   const setJson = (patch: Partial<SLSDataSourceOptions>) =>
     onOptionsChange({ ...options, jsonData: { ...jsonData, ...patch } });
@@ -84,31 +85,57 @@ export function ConfigEditor({ options, onOptionsChange }: Props) {
 
       <Text element="h3">Authentication</Text>
       <Text color="secondary">
-        Use a RAM user with read access to the logstores only: <code>log:GetLogStoreLogs</code> is enough for queries;{' '}
+        Grant read access to the logstores only: <code>log:GetLogStoreLogs</code> is enough for queries;{' '}
         <code>log:GetLogStore</code>, <code>log:ListLogStores</code> and <code>log:GetIndex</code> improve the health
         check, the logstore list and field suggestions.{' '}
         <TextLink href="https://help.aliyun.com/zh/sls/user-guide/overview-of-ram-policies" external>
           RAM policies
         </TextLink>
       </Text>
-      <Field label="AccessKey ID" required>
-        <SecretInput
-          width={50}
-          isConfigured={Boolean(secureJsonFields?.accessKeyId)}
-          value={secure.accessKeyId ?? ''}
-          onChange={(e) => setSecret('accessKeyId', e.currentTarget.value)}
-          onReset={() => resetSecret('accessKeyId')}
+      <Field label="Authentication">
+        <RadioButtonGroup
+          options={[
+            { label: 'AccessKey', value: 'accessKey' },
+            { label: 'ECS RAM role', value: 'ecsRamRole' },
+          ]}
+          value={ramRole ? 'ecsRamRole' : 'accessKey'}
+          onChange={(v) => setJson({ authType: v === 'ecsRamRole' ? 'ecsRamRole' : undefined })}
         />
       </Field>
-      <Field label="AccessKey secret" required>
-        <SecretInput
-          width={50}
-          isConfigured={Boolean(secureJsonFields?.accessKeySecret)}
-          value={secure.accessKeySecret ?? ''}
-          onChange={(e) => setSecret('accessKeySecret', e.currentTarget.value)}
-          onReset={() => resetSecret('accessKeySecret')}
-        />
-      </Field>
+      {ramRole ? (
+        <Field
+          label="RAM role name"
+          description="The RAM role attached to the ECS instance Grafana runs on. Temporary credentials come from the instance metadata service and are refreshed before they expire; no AccessKey is stored."
+          required
+        >
+          <Input
+            width={40}
+            value={jsonData.ramRoleName ?? ''}
+            onChange={(e) => setJson({ ramRoleName: e.currentTarget.value.trim() })}
+          />
+        </Field>
+      ) : (
+        <>
+          <Field label="AccessKey ID" required>
+            <SecretInput
+              width={50}
+              isConfigured={Boolean(secureJsonFields?.accessKeyId)}
+              value={secure.accessKeyId ?? ''}
+              onChange={(e) => setSecret('accessKeyId', e.currentTarget.value)}
+              onReset={() => resetSecret('accessKeyId')}
+            />
+          </Field>
+          <Field label="AccessKey secret" required>
+            <SecretInput
+              width={50}
+              isConfigured={Boolean(secureJsonFields?.accessKeySecret)}
+              value={secure.accessKeySecret ?? ''}
+              onChange={(e) => setSecret('accessKeySecret', e.currentTarget.value)}
+              onReset={() => resetSecret('accessKeySecret')}
+            />
+          </Field>
+        </>
+      )}
 
       <Text element="h3">Advanced</Text>
       <Field

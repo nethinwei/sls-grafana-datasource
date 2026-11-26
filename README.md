@@ -27,12 +27,51 @@
 | Project | SLS project |
 | Default logstore | 查询未指定 logstore 时使用，健康检查也用它 |
 | Region | 地域 ID，例如 `cn-hangzhou`。填写后使用 V4 签名 |
-| AccessKey | 建议使用只授权了目标 logstore 的 RAM 用户 |
+| Authentication | 认证方式：`AccessKey`（默认）或 `ECS RAM role`（Grafana 部署在阿里云 ECS 上时可用）。用 RAM 角色时填写实例绑定的角色名，插件从 ECS 元数据服务获取临时凭据、过期前自动刷新，不需要保存 AccessKey |
+| AccessKey | 认证方式为 AccessKey 时填写，建议使用只授权了目标 logstore 的 RAM 用户 |
 | SQL time zone | SQL 返回的日期时间字符串（`timestamp` 列、`from_unixtime`、`date_format`）的时区，SLS 默认 UTC+8，所以默认 `Asia/Shanghai` |
 | Max wide-table cells / Max flattened fields | 单次查询结果的内存上限：SQL 转时间序列的单元格数（默认 600 万，超出时报错并提示减少维度），`json` 规则每次结果最多展开的字段数（默认 200，超出部分保留原 JSON 并提示） |
 | Logs | 日志的处理与展示：级别字段、时间字段、日志行字段、字段规则，见下文「日志处理」 |
 
-最小权限：查询只需要 `log:GetLogStoreLogs`。以下权限可选：`log:GetLogStore`（健康检查）、`log:ListLogStores`（logstore 下拉列表）、`log:GetIndex`（字段目录：补全、字段提示、字段浏览与筛选，没有时从样本日志中归纳）、`log:GetLogStoreContextLogs`（日志上下文）、`log:GetLogStoreHistogram`（级别字段未开启统计时的日志量）。
+最小权限（授给 RAM 用户或 ECS 实例的 RAM 角色）：查询只需要 `log:GetLogStoreLogs`。以下权限可选：`log:GetLogStore`（健康检查）、`log:ListLogStores`（logstore 下拉列表）、`log:GetIndex`（字段目录：补全、字段提示、字段浏览与筛选，没有时从样本日志中归纳）、`log:GetLogStoreContextLogs`（日志上下文）、`log:GetLogStoreHistogram`（级别字段未开启统计时的日志量）。
+
+### ECS RAM 角色
+
+Grafana 部署在阿里云 ECS 上时，可以不保存 AccessKey，改用实例绑定的 RAM 角色：
+
+1. 新建 RAM 角色，可信实体选「阿里云服务 → 云服务器 ECS」，按上面的最小权限授权，并在 ECS 控制台把角色授予 Grafana 所在实例。
+2. 数据源「Authentication」选 `ECS RAM role`，填写角色名。
+
+插件通过 ECS 元数据服务（`http://100.100.100.200`）获取临时凭据，过期前自动刷新，失败时重试。注意：
+
+- Grafana 进程必须能访问元数据服务。直接部署或使用 Docker 默认网络时都可以访问。
+- 实例的元数据访问模式不能是「强制加固模式」：SLS Go SDK 获取凭据时不携带加固模式所需的 token。
+
+### Provisioning 示例
+
+```yaml
+apiVersion: 1
+datasources:
+  # AccessKey
+  - name: SLS
+    type: nethinwei-sls-datasource
+    url: cn-hangzhou-intranet.log.aliyuncs.com
+    jsonData:
+      project: my-project
+      logstore: my-logstore
+    secureJsonData:
+      accessKeyId: ${SLS_ACCESS_KEY_ID}
+      accessKeySecret: ${SLS_ACCESS_KEY_SECRET}
+  # ECS RAM 角色
+  - name: SLS (RAM role)
+    type: nethinwei-sls-datasource
+    url: cn-hangzhou-intranet.log.aliyuncs.com
+    jsonData:
+      project: my-project
+      logstore: my-logstore
+      authType: ecsRamRole
+      ramRoleName: my-grafana-role
+```
 
 ## 查询
 

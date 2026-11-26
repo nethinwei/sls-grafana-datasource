@@ -27,12 +27,51 @@ Download `nethinwei-sls-datasource-v<version>.zip` from [Releases](../../release
 | Project | SLS project |
 | Default logstore | Used when a query does not choose a logstore, and by the health check |
 | Region | Region ID such as `cn-hangzhou`; when set, requests use signature V4 |
-| AccessKey | Prefer a RAM user granted only on the logstores you query |
+| Authentication | `AccessKey` (default) or `ECS RAM role` (when Grafana runs on Alibaba Cloud ECS). With a RAM role, enter the role attached to the instance: the plugin gets temporary credentials from the ECS metadata service and refreshes them before they expire; no AccessKey is stored |
+| AccessKey | For AccessKey authentication; prefer a RAM user granted only on the logstores you query |
 | SQL time zone | Zone of date-time strings returned by SQL (timestamp columns, `from_unixtime`, `date_format`). SLS uses UTC+8, hence the default `Asia/Shanghai` |
 | Max wide-table cells / Max flattened fields | Memory bounds of one result: cells of an SQL result turned into time series (default 6,000,000; larger results return an error suggesting fewer dimensions), and fields the `json` rule creates per result (default 200; past it the JSON stays as it is, with a notice) |
 | Logs | How logs are processed and shown: level field, time field, line fields, field rules; see "Log processing" below |
 
-Least privilege: queries need only `log:GetLogStoreLogs`. Optional: `log:GetLogStore` (health check), `log:ListLogStores` (logstore list), `log:GetIndex` (field catalog: completion, hints, field browser and filters; otherwise inferred from sample logs), `log:GetLogStoreContextLogs` (log context), `log:GetLogStoreHistogram` (volume when the level field has no SQL statistics).
+Least privilege (for the RAM user or the ECS instance RAM role): queries need only `log:GetLogStoreLogs`. Optional: `log:GetLogStore` (health check), `log:ListLogStores` (logstore list), `log:GetIndex` (field catalog: completion, hints, field browser and filters; otherwise inferred from sample logs), `log:GetLogStoreContextLogs` (log context), `log:GetLogStoreHistogram` (volume when the level field has no SQL statistics).
+
+### ECS RAM role
+
+When Grafana runs on Alibaba Cloud ECS, it can sign requests with the RAM role attached to the instance instead of a stored AccessKey:
+
+1. Create a RAM role trusted by the ECS service, grant it the permissions above, and attach it to the Grafana instance in the ECS console.
+2. Set "Authentication" to `ECS RAM role` and enter the role name.
+
+The plugin gets temporary credentials from the ECS metadata service (`http://100.100.100.200`), refreshes them before they expire and retries on failure. Notes:
+
+- Grafana must reach the metadata service: it can when installed on the host or in a container on Docker's default network.
+- The instance metadata access mode must not be "enforced hardened mode": the SLS Go SDK does not send the token that mode requires.
+
+### Provisioning example
+
+```yaml
+apiVersion: 1
+datasources:
+  # AccessKey
+  - name: SLS
+    type: nethinwei-sls-datasource
+    url: cn-hangzhou-intranet.log.aliyuncs.com
+    jsonData:
+      project: my-project
+      logstore: my-logstore
+    secureJsonData:
+      accessKeyId: ${SLS_ACCESS_KEY_ID}
+      accessKeySecret: ${SLS_ACCESS_KEY_SECRET}
+  # ECS RAM role
+  - name: SLS (RAM role)
+    type: nethinwei-sls-datasource
+    url: cn-hangzhou-intranet.log.aliyuncs.com
+    jsonData:
+      project: my-project
+      logstore: my-logstore
+      authType: ecsRamRole
+      ramRoleName: my-grafana-role
+```
 
 ## Query
 

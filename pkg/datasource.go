@@ -60,7 +60,7 @@ func newDatasource(_ context.Context, s backend.DataSourceInstanceSettings) (ins
 		ds.resources = newResourceHandler(ds)
 		return ds, nil
 	}
-	credentials := sls.NewStaticCredentialsProvider(cfg.AccessKeyID, cfg.AccessKeySecret, "")
+	credentials := cfg.credentials()
 	client := sls.CreateNormalInterfaceV2(cfg.Endpoint, credentials)
 	client.SetUserAgent(userAgent)
 	client.SetRetryTimeout(retryTimeout)

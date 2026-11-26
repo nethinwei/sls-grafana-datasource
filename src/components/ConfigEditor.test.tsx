@@ -55,6 +55,26 @@ describe('ConfigEditor', () => {
   });
 });
 
+describe('ConfigEditor authentication', () => {
+  it('uses an ECS RAM role instead of an AccessKey', () => {
+    const onChange = jest.fn();
+    const { rerender } = render(<ConfigEditor options={options()} onOptionsChange={onChange} />);
+    fireEvent.click(screen.getByLabelText('ECS RAM role'));
+    const next = onChange.mock.calls[onChange.mock.calls.length - 1][0];
+    expect(next.jsonData).toEqual({ project: 'p1', logstore: 'ls1', authType: 'ecsRamRole' });
+
+    rerender(<ConfigEditor options={next} onOptionsChange={onChange} />);
+    expect(screen.queryByText(/^AccessKey ID/)).not.toBeInTheDocument();
+    fireEvent.change(screen.getByRole('textbox', { name: /RAM role name/ }), { target: { value: ' role-a ' } });
+    expect(onChange).toHaveBeenLastCalledWith(
+      expect.objectContaining({ jsonData: { project: 'p1', logstore: 'ls1', authType: 'ecsRamRole', ramRoleName: 'role-a' } })
+    );
+
+    fireEvent.click(screen.getByLabelText('AccessKey'));
+    expect(onChange.mock.calls[onChange.mock.calls.length - 1][0].jsonData.authType).toBeUndefined();
+  });
+});
+
 describe('ConfigEditor logs', () => {
   const lastJson = (fn: jest.Mock) => fn.mock.calls[fn.mock.calls.length - 1][0].jsonData as SLSDataSourceOptions;
 
